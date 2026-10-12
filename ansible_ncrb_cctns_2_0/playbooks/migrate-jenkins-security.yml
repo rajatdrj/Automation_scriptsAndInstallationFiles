@@ -1,0 +1,287 @@
+---
+# Copy-only Jenkins migration from source Jenkins to the new test controller.
+# Source files are never moved or deleted. The destination is backed up first.
+#
+# Run from /home/cctnscloud/ansible:
+#   ansible-playbook -i inventory/jenkins_target playbooks/migrate-jenkins-security.yml
+#
+# Source:      cctnscloud@10.212.113.31
+# Destination: jenkins_target in inventory
+#
+# This playbook does not restart Jenkins. Review security settings before restarting.
+
+- name: Create a copy-only archive from the source Jenkins controller
+  hosts: localhost
+  gather_facts: false
+  vars:
+    source_host: "10.212.113.31"
+    source_user: "cctnscloud"
+    source_home: "/var/lib/jenkins"
+    staging_dir: "/home/cctnscloud/ansible/files/jenkins-migration"
+    source_archive: "/tmp/jenkins-migration-copy.tar.gz"
+    controller_archive: "/home/cctnscloud/ansible/files/jenkins-migration/jenkins-migration-copy.tar.gz"
+    gitlab_config_files:
+      - "com.dabsquared.gitlabjenkins.connection.GitLabConnectionConfig.xml"
+      - "io.jenkins.plugins.gitlabserverconfig.servers.GitLabServers.xml"
+
+  tasks:
+    - name: Create private staging directory on Ansible controller
+      ansible.builtin.file:
+        path: "{{ staging_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create source archive without modifying source files
+      ansible.builtin.shell: |
+        set -eu
+        cd {{ source_home | quote }}
+        items="config.xml users secrets"
+        if sudo test -f {{ (source_home ~ '/credentials.xml') | quote }}; then
+          items="$items credentials.xml"
+        fi
+        for item in \
+          com.dabsquared.gitlabjenkins.connection.GitLabConnectionConfig.xml \
+          io.jenkins.plugins.gitlabserverconfig.servers.GitLabServers.xml; do
+          if sudo test -f "$item"; then
+            items="$items $item"
+          fi
+        done
+        sudo tar --exclude='secrets/initialAdminPassword' -czf {{ source_archive | quote }} $items
+        sudo chmod 0600 {{ source_archive | quote }}
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ source_host }}"
+      become: false
+      vars:
+        ansible_user: "{{ source_user }}"
+        ansible_become: false
+      changed_when: true
+
+    - name: Fetch source archive to the Ansible controller
+      ansible.builtin.fetch:
+        src: "{{ source_archive }}"
+        dest: "{{ controller_archive }}"
+        flat: true
+      delegate_to: "{{ source_host }}"
+      become: true
+      vars:
+        ansible_user: "{{ source_user }}"
+      changed_when: true
+
+    - name: Restrict access to staged archive
+      ansible.builtin.file:
+        path: "{{ controller_archive }}"
+        state: file
+        mode: "0600"
+
+- name: Back up destination and copy selected Jenkins data
+  hosts: jenkins_target
+  become: true
+  gather_facts: true
+  vars:
+    destination_home: "/var/lib/jenkins"
+    destination_user: "jenkins"
+    destination_group: "jenkins"
+    controller_archive: "/home/cctnscloud/ansible/files/jenkins-migration/jenkins-migration-copy.tar.gz"
+    remote_archive: "/tmp/jenkins-migration-copy.tar.gz"
+    import_dir: "/tmp/jenkins-source-import"
+    backup_dir: "/var/lib/jenkins-migration-backup-{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}{{ ansible_date_time.second }}"
+    gitlab_config_files:
+      - "com.dabsquared.gitlabjenkins.connection.GitLabConnectionConfig.xml"
+      - "io.jenkins.plugins.gitlabserverconfig.servers.GitLabServers.xml"
+
+  tasks:
+    - name: Verify destination Jenkins home exists
+      ansible.builtin.stat:
+        path: "{{ destination_home }}"
+      register: destination_home_stat
+
+    - name: Require destination Jenkins home
+      ansible.builtin.assert:
+        that:
+          - destination_home_stat.stat.isdir | default(false)
+        fail_msg: "Destination Jenkins home {{ destination_home }} does not exist."
+
+    - name: Verify staged source archive exists on Ansible controller
+      ansible.builtin.stat:
+        path: "{{ controller_archive }}"
+      delegate_to: localhost
+      become: false
+      register: controller_archive_stat
+
+    - name: Require staged source archive
+      ansible.builtin.assert:
+        that:
+          - controller_archive_stat.stat.exists | default(false)
+          - controller_archive_stat.stat.isreg | default(false)
+        fail_msg: "Source archive not found at {{ controller_archive }}. Run the first play successfully."
+
+    - name: Create restricted destination backup directory
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Back up existing destination files before import
+      ansible.builtin.shell: |
+        set -eu
+        cd {{ destination_home | quote }}
+        for item in \
+          config.xml users secrets credentials.xml \
+          com.dabsquared.gitlabjenkins.connection.GitLabConnectionConfig.xml \
+          io.jenkins.plugins.gitlabserverconfig.servers.GitLabServers.xml; do
+          if [ -e "$item" ]; then
+            cp -a --parents "$item" {{ backup_dir | quote }}/
+          fi
+        done
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Copy archive to destination
+      ansible.builtin.copy:
+        src: "{{ controller_archive }}"
+        dest: "{{ remote_archive }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Create temporary import directory
+      ansible.builtin.file:
+        path: "{{ import_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Extract copied source data into temporary directory
+      ansible.builtin.unarchive:
+        src: "{{ remote_archive }}"
+        dest: "{{ import_dir }}"
+        remote_src: true
+        owner: root
+        group: root
+
+    - name: Check extracted global configuration
+      ansible.builtin.stat:
+        path: "{{ import_dir }}/config.xml"
+      register: imported_config_stat
+
+    - name: Require extracted global configuration
+      ansible.builtin.assert:
+        that:
+          - imported_config_stat.stat.isreg | default(false)
+        fail_msg: "The source archive does not contain config.xml."
+
+    - name: Copy global Jenkins configuration
+      ansible.builtin.copy:
+        src: "{{ import_dir }}/config.xml"
+        dest: "{{ destination_home }}/config.xml"
+        remote_src: true
+        owner: "{{ destination_user }}"
+        group: "{{ destination_group }}"
+        mode: "0644"
+        backup: true
+
+    - name: Merge source user records and API-token data into destination
+      ansible.builtin.copy:
+        src: "{{ import_dir }}/users/"
+        dest: "{{ destination_home }}/users/"
+        remote_src: true
+        owner: "{{ destination_user }}"
+        group: "{{ destination_group }}"
+        mode: preserve
+      # Merges files and does not delete destination-only user files.
+
+    - name: Merge source secret and encryption-key files into destination
+      ansible.builtin.copy:
+        src: "{{ import_dir }}/secrets/"
+        dest: "{{ destination_home }}/secrets/"
+        remote_src: true
+        owner: "{{ destination_user }}"
+        group: "{{ destination_group }}"
+        mode: preserve
+      # The source initialAdminPassword was excluded from the archive.
+
+    - name: Check whether source credentials.xml was included
+      ansible.builtin.stat:
+        path: "{{ import_dir }}/credentials.xml"
+      register: imported_credentials_stat
+
+    - name: Copy source credentials.xml when present
+      ansible.builtin.copy:
+        src: "{{ import_dir }}/credentials.xml"
+        dest: "{{ destination_home }}/credentials.xml"
+        remote_src: true
+        owner: "{{ destination_user }}"
+        group: "{{ destination_group }}"
+        mode: "0600"
+        backup: true
+      when: imported_credentials_stat.stat.isreg | default(false)
+
+    - name: Check for each imported GitLab configuration file
+      ansible.builtin.stat:
+        path: "{{ import_dir }}/{{ item }}"
+      loop: "{{ gitlab_config_files }}"
+      register: imported_gitlab_configs
+
+    - name: Copy GitLab configuration files when present in source archive
+      ansible.builtin.copy:
+        src: "{{ item.stat.path }}"
+        dest: "{{ destination_home }}/{{ item.item }}"
+        remote_src: true
+        owner: "{{ destination_user }}"
+        group: "{{ destination_group }}"
+        mode: "0640"
+        backup: true
+      loop: "{{ imported_gitlab_configs.results }}"
+      when: item.stat.isreg | default(false)
+
+    - name: Report GitLab configuration files absent from source archive
+      ansible.builtin.debug:
+        msg: "Not copied because the source archive does not contain {{ item.item }}."
+      loop: "{{ imported_gitlab_configs.results }}"
+      when: not (item.stat.isreg | default(false))
+
+    - name: Ensure destination Jenkins home ownership
+      ansible.builtin.file:
+        path: "{{ destination_home }}"
+        state: directory
+        owner: "{{ destination_user }}"
+        group: "{{ destination_group }}"
+
+    - name: Verify copied GitLab connection name and URL
+      ansible.builtin.shell: |
+        set -eu
+        grep -Fq '<name>CCTNS-2.0-Gitlab</name>' \
+          {{ (destination_home ~ '/com.dabsquared.gitlabjenkins.connection.GitLabConnectionConfig.xml') | quote }}
+        grep -Fq '<url>http://10.212.107.97:7000</url>' \
+          {{ (destination_home ~ '/com.dabsquared.gitlabjenkins.connection.GitLabConnectionConfig.xml') | quote }}
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: >
+        (imported_gitlab_configs.results
+         | selectattr('item', 'equalto', 'com.dabsquared.gitlabjenkins.connection.GitLabConnectionConfig.xml')
+         | selectattr('stat.isreg', 'defined')
+         | list | length) > 0
+
+    - name: Report migration completion without exposing secrets
+      ansible.builtin.debug:
+        msg:
+          - "Jenkins migration copy tasks completed; source files were not moved or deleted."
+          - "Source: 10.212.113.31:/var/lib/jenkins"
+          - "Destination: {{ destination_home }}"
+          - "Destination backup: {{ backup_dir }}"
+          - "Copied global config, user records, secret/key files, credentials.xml when present, and GitLab XML files when present."
+          - "Jenkins was not restarted automatically."
+          - "GitLab XML references credential IDs gitlab_token, gitlab_token_1, and gitlab-jenkins-trigger-token; verify these credentials exist on the test controller."
+
+    - name: Remind operator to validate before restarting
+      ansible.builtin.debug:
+        msg:
+          - "Review security realm, authorization, credentials, API tokens, GitLab connections, and shared-library configuration before restarting."
+          - "The source config.xml replaces the destination global config.xml; destination backup is available at {{ backup_dir }}."
+

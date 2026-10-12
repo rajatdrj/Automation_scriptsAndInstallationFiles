@@ -1,0 +1,6 @@
+---
+kubeconfig_path: "/home/cctnscloud/ansible/elastic-k8s-setup/files/.kube/elastic-admin.conf"
+
+eck_crd_file: "/home/cctnscloud/ansible/elastic-k8s-setup/files/eck-3.4.1-crds.yaml"
+
+eck_operator_file: "/home/cctnscloud/ansible/elastic-k8s-setup/files/eck-3.4.1-operator.yaml"

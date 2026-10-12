@@ -1,0 +1,198 @@
+---
+- name: Install Docker on RHEL
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+
+    # Users to add to Docker group
+    docker_users:
+      - cctnscloud
+
+    # Docker packages
+    docker_packages:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+
+
+    # CA cert for Docker
+    ca_cert_src: /home/cctnscloud/ansible/files/mkcert-rootCA.pem
+    ca_cert_dest: /etc/pki/ca-trust/source/anchors/mkcert-rootCA.pem
+
+
+  tasks:
+
+
+  ##################################################################
+  # 1. Remove Podman & Buildah
+  ##################################################################
+
+    - name: Remove podman and buildah
+      dnf:
+        name:
+          - podman
+          - buildah
+        state: absent
+
+  ##################################################################
+  # 2. Add Docker Repository
+  ##################################################################
+
+    - name: Add Docker CE repository
+      get_url:
+        url: https://download.docker.com/linux/rhel/docker-ce.repo
+        dest: /etc/yum.repos.d/docker-ce.repo
+        mode: '0644'
+
+  ##################################################################
+  # 3. Install Docker Packages
+  ##################################################################
+
+    - name: Install Docker CE packages
+      dnf:
+        name: "{{ docker_packages }}"
+        state: present
+
+  ##################################################################
+  # 4. Enable & Start Docker Service
+  ##################################################################
+
+    - name: Enable and start Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+  ##################################################################
+  # 5. Add Users to Docker Group
+  ##################################################################
+
+    - name: Ensure docker group exists
+      group:
+        name: docker
+        state: present
+
+    - name: Add users to docker group
+      user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+      loop: "{{ docker_users }}"
+
+
+  ##################################################################
+  # 6. Trust CA Certificate for Docker
+  ##################################################################
+
+    - name: Copy CA cert for Docker registry
+      copy:
+        src: "{{ ca_cert_src }}"
+        dest: "{{ ca_cert_dest }}"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Update CA trust
+      command: update-ca-trust
+      changed_when: false
+
+
+  ##################################################################
+  # 7. Verify Docker installation
+  ##################################################################
+
+    - name: Verify Docker installation
+      command: docker version
+      register: docker_version
+      changed_when: false
+
+    - name: Show Docker version
+      debug:
+        var: docker_version.stdout_lines
+  ##################################################################
+  # 8. Configure Insecure Registries
+  ##################################################################
+
+    - name: Configure Docker daemon.json with insecure registries
+      copy:
+        dest: /etc/docker/daemon.json
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          {
+            "insecure-registries": [
+              "10.212.107.119:5000",
+              "10.212.113.11:5004",
+              "10.212.113.11:5001",
+              "10.212.113.11:5000"
+            ]
+          }
+      notify: Restart Docker
+
+
+  ##################################################################
+  # 9. Configure Docker Proxy
+  ##################################################################
+
+    - name: Create docker.service.d directory
+      file:
+        path: /etc/systemd/system/docker.service.d/
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure HTTP proxy for Docker
+      copy:
+        dest: /etc/systemd/system/docker.service.d/http-proxy.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Service]
+          Environment="HTTP_PROXY=http://192.0.2.12:8080/"
+          Environment="HTTPS_PROXY=http://192.0.2.12:8080/"
+          Environment="NO_PROXY=localhost,127.0.0.1,.example.com,10.212.113.73,10.212.107.119,10.212.113.11,10.212.135.229,10.212.174.171,10.212.174.190,10.212.174.150"
+      notify: Reload systemd and restart Docker
+
+
+  ##################################################################
+  # 10. Reload systemd and Restart Docker
+  ##################################################################
+
+  handlers:
+
+    - name: Reload systemd and restart Docker
+      systemd:
+        daemon_reload: yes
+        name: docker
+        state: restarted
+
+    - name: Restart Docker
+      systemd:
+        name: docker
+        state: restarted
+
+
+  ##################################################################
+  # 11. Verify Docker Service Status After Changes
+  ##################################################################
+
+    - name: Check Docker service status
+      systemd:
+        name: docker
+      register: docker_status
+
+    - name: Display Docker service state
+      debug:
+        var: docker_status.status.ActiveState
+
+    - name: Ensure Docker is running
+      fail:
+        msg: "Docker service is not running!"
+      when: docker_status.status.ActiveState != "active"

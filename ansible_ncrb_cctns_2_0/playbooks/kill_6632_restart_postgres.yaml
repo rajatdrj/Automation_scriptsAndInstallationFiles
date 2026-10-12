@@ -1,0 +1,30 @@
+---
+- name: Ensure port 6632 is free for PostgreSQL
+  hosts: postgres_servers
+  become: yes
+  tasks:
+
+    - name: Check which process is listening on port 6632
+      shell: "ss -tulpn | grep :6632 || true"
+      register: port_check
+      changed_when: false
+
+    - name: Set fact if Python is using port 6632
+      set_fact:
+        python_on_6632: "{{ 'python' in port_check.stdout }}"
+
+    - name: Kill Python process on port 6632 if present
+      command: "pkill -f 'python -m http.server 6632'"
+      when: python_on_6632
+      register: kill_python
+
+    - name: Restart PostgreSQL 18 service if Python was killed
+      systemd:
+        name: postgresql-18
+        state: restarted
+      when: kill_python is defined and kill_python.rc == 0
+
+    - name: Display message if PostgreSQL is already on 6632
+      debug:
+        msg: "PostgreSQL is already running on port 6632, nothing to do."
+      when: not python_on_6632

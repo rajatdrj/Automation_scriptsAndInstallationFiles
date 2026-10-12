@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${SERVICE_NAME}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${SERVICE_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${SERVICE_NAME}
+    spec:
+      hostAliases:
+        - ip: "10.212.113.65"
+          hostnames:
+            - "cctns.objstore.gov.in"
+      serviceAccountName: uat-uttarakhand-sa
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: state
+                    operator: In
+                    values:
+                      - uttarakhand
+                  - key: tier
+                    operator: In
+                    values:
+                      - backend
+      containers:
+        - name: ${SERVICE_NAME}
+          image: cctns.registry.uat.gov.in:5043/${SERVICE_NAME}:1.0.23
+          ports:
+            - containerPort: ${APP_PORT}
+          envFrom:
+            - configMapRef:
+                name: ${SERVICE_NAME}-uat-uttarakhand
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${SERVICE_NAME}
+spec:
+  selector:
+    app: ${SERVICE_NAME}
+  ports:
+    - protocol: TCP
+      port: ${APP_PORT}
+      targetPort: ${APP_PORT}
+  type: ClusterIP

@@ -1,0 +1,76 @@
+---
+- name: Ensure DNS resolution works using systemd-resolved
+  hosts: all
+  become: true
+  gather_facts: true
+  serial: 5
+
+  vars:
+    primary_dns: "10.212.174.160"
+    resolved_conf: /etc/systemd/resolved.conf
+    uplink_resolv: /run/systemd/resolve/resolv.conf
+    backup_dir: /var/backups/dns
+
+  tasks:
+
+    ############################################################
+    # Backup
+    ############################################################
+    - name: Ensure backup directory exists
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Backup current resolv.conf
+      copy:
+        src: /etc/resolv.conf
+        dest: "{{ backup_dir }}/resolv.conf.{{ ansible_date_time.iso8601 }}"
+        remote_src: yes
+      ignore_errors: yes
+
+    ############################################################
+    # Ubuntu / Debian (SAFE RESOLUTION FIX)
+    ############################################################
+    - name: Ensure systemd-resolved is enabled and running
+      service:
+        name: systemd-resolved
+        state: started
+        enabled: yes
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Ensure primary DNS is configured (do not force order)
+      lineinfile:
+        path: "{{ resolved_conf }}"
+        regexp: '^DNS='
+        line: "DNS={{ primary_dns }}"
+        insertafter: '^\[Resolve\]'
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Ensure resolv.conf points to systemd uplink
+      file:
+        path: /etc/resolv.conf
+        src: "{{ uplink_resolv }}"
+        state: link
+        force: yes
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Restart systemd-resolved
+      service:
+        name: systemd-resolved
+        state: restarted
+      when: ansible_facts.os_family == "Debian"
+
+    ############################################################
+    # Validation (informational only)
+    ############################################################
+    - name: Show active DNS status
+      command: resolvectl status
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Test DNS resolution
+      command: getent hosts google.com
+      changed_when: false
+      failed_when: false

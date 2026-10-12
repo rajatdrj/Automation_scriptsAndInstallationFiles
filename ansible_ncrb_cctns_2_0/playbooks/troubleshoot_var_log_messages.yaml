@@ -1,0 +1,140 @@
+---
+- name: Extend /var/log (if possible), else delete oldest messages logs, then compress
+  hosts: all
+  gather_facts: yes
+  become: yes
+  vars:
+    target_size_gb: 9
+    usage_threshold: 80
+    mount_point: /var/log
+    fallback_delete_count: 20          # delete more to free space (increased from 10)
+
+  tasks:
+    # ---- Get mount info ----
+    - name: Get mount info for /var/log
+      set_fact:
+        mount_info: "{{ ansible_mounts | selectattr('mount', 'equalto', mount_point) | first }}"
+      when: ansible_mounts | selectattr('mount', 'equalto', mount_point) | list | length > 0
+
+    - name: Fail if /var/log is not a separate mount
+      fail:
+        msg: "/var/log is not a separate filesystem"
+      when: mount_info is not defined
+
+    # ---- Current size & usage ----
+    - name: Calculate current size and usage
+      set_fact:
+        current_size_gb: "{{ (mount_info.size_total / (1024**3)) | float }}"
+        usage_percent: "{{ ((mount_info.size_total - mount_info.size_available) / mount_info.size_total * 100) | float }}"
+
+    # ---- Check VG space (only if size < target) ----
+    - block:
+        - name: Extract VG and LV names from device
+          set_fact:
+            device: "{{ mount_info.device }}"
+            vg_name: "{{ mount_info.device | regex_replace('^/dev/mapper/([^-]+)-.*', '\\1') }}"
+            lv_name: "{{ mount_info.device | regex_replace('^/dev/mapper/[^-]+-(.*)$', '\\1') }}"
+
+        - name: Display VG/LV info
+          debug:
+            msg: "Device {{ device }} → VG: {{ vg_name }}, LV: {{ lv_name }}"
+
+        - name: Get VG free space in GB
+          shell: "vgs --units g --noheadings --options vg_free --nosuffix {{ vg_name }} | tr -d ' '"
+          register: vg_free_output
+          changed_when: false
+
+        - name: Parse VG free space as float
+          set_fact:
+            vg_free_gb: "{{ vg_free_output.stdout | float }}"
+
+        - name: Check if VG has enough free space
+          set_fact:
+            vg_has_space: "{{ (vg_free_gb | float) >= ((target_size_gb - (current_size_gb | float)) | float) }}"
+
+      when:
+        - usage_percent | float > usage_threshold
+        - current_size_gb | float < target_size_gb
+
+    # ---- Extension (if VG has space and size < target) ----
+    - block:
+        - name: Extend logical volume to {{ target_size_gb }}G
+          lvol:
+            vg: "{{ vg_name }}"
+            lv: "{{ lv_name }}"
+            size: "{{ target_size_gb }}G"
+            force: yes
+
+        - name: Resize XFS filesystem on {{ mount_point }}
+          command: xfs_growfs {{ mount_point }}
+          register: growfs_result
+          changed_when: "'data blocks changed' in growfs_result.stdout"
+
+        - name: Display success message
+          debug:
+            msg: "Successfully extended {{ mount_point }} to {{ target_size_gb }}G on {{ inventory_hostname }}"
+
+      when:
+        - usage_percent | float > usage_threshold
+        - current_size_gb | float < target_size_gb
+        - vg_has_space is defined
+        - vg_has_space | bool
+
+    # ---- Fallback deletion (if we cannot extend) ----
+    # This runs when:
+    #   - usage > threshold, AND
+    #   - either (size >= target) OR (size < target but VG lacks space)
+    - block:
+        - name: Get sorted list of all rotated messages logs (including .gz)
+          shell: |
+            find {{ mount_point }} -maxdepth 1 -type f \( -name "messages.[0-9]*" -o -name "messages-[0-9]*" -o -name "messages-*" \) -printf "%f\n" | sort -V
+          register: all_rotated_files
+          changed_when: false
+
+        - name: Determine oldest files to delete (including .gz)
+          set_fact:
+            files_to_delete: "{{ all_rotated_files.stdout_lines[:fallback_delete_count] }}"
+
+        - name: Delete oldest rotated messages logs (including .gz)
+          file:
+            path: "{{ mount_point }}/{{ item }}"
+            state: absent
+          loop: "{{ files_to_delete }}"
+          when: files_to_delete | length > 0
+
+        - name: Log deletion count
+          debug:
+            msg: "Deleted {{ files_to_delete | length }} oldest rotated messages logs on {{ inventory_hostname }}"
+
+      when:
+        - usage_percent | float > usage_threshold
+        - (current_size_gb | float >= target_size_gb) or (vg_has_space is defined and not vg_has_space) or (vg_has_space is not defined)
+
+    # ---- Get open files (active messages) to avoid compressing them ----
+    - name: Get list of messages files open for writing
+      shell: |
+        lsof -t -F n +D {{ mount_point }} 2>/dev/null | grep '^n' | sed 's/^n//' | grep -E 'messages$|messages\.[0-9]+$|messages-[0-9]+$' || true
+      register: open_files_raw
+      changed_when: false
+      when: usage_percent | float > usage_threshold
+
+    - name: Convert open files to basenames
+      set_fact:
+        open_files: "{{ open_files_raw.stdout_lines | map('basename') | list }}"
+      when: usage_percent | float > usage_threshold
+
+    # ---- Compression (runs on all hosts with usage > threshold) ----
+    - name: Compress old messages logs (skip open files and .gz)
+      shell: |
+        find {{ mount_point }} -maxdepth 1 -type f \( -name "messages.[0-9]*" -o -name "messages-[0-9]*" -o -name "messages-*" \) -not -name "*.gz" -print0 | while IFS= read -r -d '' file; do
+          basename=$(basename "$file")
+          if ! echo "{{ open_files | join('\n') }}" | grep -Fxq "$basename"; then
+            gzip "$file"
+          fi
+        done
+      register: compress_result
+      changed_when: compress_result.stdout | trim != ""
+      when:
+        - usage_percent | float > usage_threshold
+        - open_files is defined
+      ignore_errors: yes

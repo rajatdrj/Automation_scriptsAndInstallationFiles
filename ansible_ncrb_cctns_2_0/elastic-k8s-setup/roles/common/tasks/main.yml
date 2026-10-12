@@ -1,0 +1,63 @@
+
+- name: Disable SELinux
+  selinux:
+    state: disabled
+
+- name: Stop Firewalld
+  service:
+    name: firewalld
+    state: stopped
+    enabled: no
+
+- name: Disable swap
+  shell: |
+    swapoff -a
+    sed -i '/ swap / s/^/#/' /etc/fstab
+
+- name: Configure proxy settings
+  copy:
+    dest: /etc/environment
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      export http_proxy="http://192.0.2.12:8080"
+      export https_proxy="http://192.0.2.12:8080"
+      export no_proxy="localhost,127.0.0.1,192.0.2.50,10.212.135.70,10.212.135.120,10.212.135.92,10.212.135.101,10.212.135.105,10.212.135.125,10.212.135.69,10.212.135.118,10.212.135.93,10.212.135.67,10.212.135.83,10.212.135.112,10.212.135.91"
+
+- name: Enable kernel modules
+  copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+
+- name: Load modules
+  shell: |
+    modprobe overlay
+    modprobe br_netfilter
+
+- name: Configure sysctl
+  copy:
+    dest: /etc/sysctl.d/k8s.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables=1
+      net.bridge.bridge-nf-call-ip6tables=1
+      net.ipv4.ip_forward=1
+
+- name: Apply sysctl
+  command: sysctl --system
+
+- name: Install packages
+  dnf:
+    name:
+      - curl
+      - wget
+      - vim
+      - bash-completion
+      - iproute
+      - tar
+      - socat
+      - conntrack-tools
+      - yum-utils
+    state: present

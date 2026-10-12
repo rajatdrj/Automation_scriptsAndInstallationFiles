@@ -1,0 +1,95 @@
+---
+- name: Ensure primary DNS is first without forcing secondary DNS
+  hosts: all
+  become: true
+  gather_facts: true
+  serial: 5
+
+  vars:
+    primary_dns: "10.212.174.160"
+    search_domain: "uat.gov.in ncrb.in"
+    backup_dir: /var/backups/dns
+
+  tasks:
+
+    ############################################################
+    # Backup
+    ############################################################
+    - name: Ensure backup directory exists
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Backup current resolv.conf
+      copy:
+        src: /etc/resolv.conf
+        dest: "{{ backup_dir }}/resolv.conf.{{ ansible_date_time.iso8601 }}"
+        remote_src: yes
+      ignore_errors: yes
+
+    ############################################################
+    # RHEL – NetworkManager (PRIMARY ONLY)
+    ############################################################
+    - name: Configure primary DNS on RHEL using NetworkManager
+      block:
+        - name: Get active NetworkManager connection
+          command: nmcli -t -f NAME c show --active
+          register: nm_conn
+          changed_when: false
+
+        - name: Set primary DNS only (do not force secondary)
+          command: >
+            nmcli connection modify "{{ nm_conn.stdout_lines[0] }}"
+            ipv4.dns "{{ primary_dns }}"
+            ipv4.ignore-auto-dns no
+
+        - name: Reload NetworkManager connection
+          command: nmcli connection up "{{ nm_conn.stdout_lines[0] }}"
+      when: ansible_facts.os_family == "RedHat"
+
+    ############################################################
+    # Ubuntu / Debian – systemd-resolved (PRIMARY ONLY)
+    ############################################################
+    - name: Ensure Resolve section exists
+      lineinfile:
+        path: /etc/systemd/resolved.conf
+        line: "[Resolve]"
+        create: yes
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Set PRIMARY DNS only (do not touch secondary)
+      lineinfile:
+        path: /etc/systemd/resolved.conf
+        regexp: '^DNS='
+        line: "DNS={{ primary_dns }}"
+      register: dns_cfg
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Set search domain
+      lineinfile:
+        path: /etc/systemd/resolved.conf
+        regexp: '^Domains='
+        line: "Domains={{ search_domain }}"
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Restart systemd-resolved if DNS changed
+      service:
+        name: systemd-resolved
+        state: restarted
+      when:
+        - ansible_facts.os_family == "Debian"
+        - dns_cfg.changed
+
+    ############################################################
+    # Validation (non-blocking)
+    ############################################################
+    - name: Show resolv.conf
+      command: cat /etc/resolv.conf
+      changed_when: false
+
+    - name: Test DNS resolution (informational)
+      command: nslookup cctns.registry.uat.gov.in
+      register: dns_test
+      changed_when: false
+      failed_when: false

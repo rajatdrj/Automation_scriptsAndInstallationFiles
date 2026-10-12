@@ -1,0 +1,56 @@
+---
+- name: Configure PostgreSQL 18 for remote access
+  hosts: all
+  become: yes
+  vars:
+    pg_major: "18"
+    pg_data_dir: "/var/lib/pgsql/18/data"
+    pg_port: 6632
+    pg_password: "NcrbSecure@123456"
+
+  tasks:
+
+    - name: Add listen_addresses below commented line
+      lineinfile:
+        path: "{{ pg_data_dir }}/postgresql.conf"
+        insertafter: '^#listen_addresses ='
+        line: "listen_addresses = '*'"
+        state: present
+
+    - name: Add port below commented line
+      lineinfile:
+        path: "{{ pg_data_dir }}/postgresql.conf"
+        insertafter: '^#port ='
+        line: "port = {{ pg_port }}"
+        state: present
+
+    - name: Add remote access rule to pg_hba.conf
+      lineinfile:
+        path: "{{ pg_data_dir }}/pg_hba.conf"
+        line: "host    all     all     0.0.0.0/0            md5"
+        state: present
+        insertafter: EOF
+
+    - name: Ensure psycopg2 Python package is installed
+      dnf:
+        name: python3-psycopg2
+        state: present
+
+
+    - name: Ensure postgres user has the correct password
+      become_user: postgres
+      postgresql_user:
+        name: postgres
+        password: "{{ pg_password }}"
+
+    - name: Restart PostgreSQL to apply configuration
+      systemd:
+        name: "postgresql-{{ pg_major }}"
+        state: restarted
+        enabled: yes
+
+    - name: Ensure PostgreSQL service is running
+      systemd:
+        name: "postgresql-{{ pg_major }}"
+        state: started
+        enabled: yes

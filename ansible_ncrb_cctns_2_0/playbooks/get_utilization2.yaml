@@ -1,0 +1,346 @@
+---
+- name: Infrastructure Health Report
+  hosts: all
+  become: yes
+  gather_facts: yes
+  ignore_unreachable: yes
+  
+  vars:
+    services_to_check:
+      - docker
+      - crio
+      - kubelet
+      - kube-apiserver
+      - kafka
+      - redis
+      - redis-server
+      - elasticsearch
+      - apisix
+      - nginx
+      - jenkins
+      - jenkins-agent
+      - zookeeper
+      - etcd
+    
+    failed_hosts: []
+
+  tasks:
+    
+    - name: Get OS Information
+      setup:
+        filter:
+          - ansible_system
+          - ansible_distribution
+          - ansible_distribution_version
+          - ansible_os_family
+
+    - name: Determine OS Type and Version
+      set_fact:
+        os_type: "{{ ansible_system }}"
+        os_distribution: "{{ ansible_distribution | default('Unknown') }}"
+        os_version: "{{ ansible_distribution_version | default('Unknown') }}"
+        is_windows: "{{ ansible_system == 'Win32NT' or ansible_os_family == 'Windows' }}"
+      when: ansible_system is defined
+
+    # ============================================
+    # CPU CHECK - LINUX
+    # ============================================
+    - name: Get CPU Utilization - Linux
+      shell: |
+        top -bn1 | grep "Cpu(s)" | awk '{print 100-$8}'
+      register: cpu
+      changed_when: false
+      ignore_errors: yes
+      when: not is_windows
+
+    # ============================================
+    # CPU CHECK - WINDOWS (skip if no Windows collection)
+    # ============================================
+    - name: Get CPU Utilization - Windows
+      shell: |
+        typeperf "\Processor(_Total)\% Processor Time" -sc 1 | tail -n +2 | cut -d',' -f2 | tr -d '"'
+      register: cpu_windows
+      changed_when: false
+      ignore_errors: yes
+      when: is_windows and ansible_connection == 'winrm'
+      failed_when: false
+
+    # Alternative Windows CPU check using WMI via PowerShell
+    - name: Get CPU Utilization - Windows (WMI)
+      shell: |
+        powershell.exe -Command "Get-WmiObject -Class Win32_Processor | Measure-Object -Property LoadPercentage -Average | Select-Object -ExpandProperty Average"
+      register: cpu_windows_alt
+      changed_when: false
+      ignore_errors: yes
+      when: is_windows and (cpu_windows is failed or cpu_windows.skipped is defined)
+      failed_when: false
+
+    - name: Set CPU Fact for Windows
+      set_fact:
+        cpu: "{{ cpu_windows_alt.stdout if cpu_windows_alt.stdout is defined else cpu_windows.stdout }}"
+      when: is_windows
+
+    # ============================================
+    # MEMORY CHECK - LINUX
+    # ============================================
+    - name: Get Memory Utilization - Linux
+      shell: |
+        free | awk '/Mem:/ {printf("%.2f",$3/$2*100)}'
+      register: memory
+      changed_when: false
+      ignore_errors: yes
+      when: not is_windows
+
+    # ============================================
+    # MEMORY CHECK - WINDOWS
+    # ============================================
+    - name: Get Memory Utilization - Windows
+      shell: |
+        powershell.exe -Command "$os = Get-WmiObject -Class Win32_OperatingSystem; $total = $os.TotalVisibleMemorySize; $free = $os.FreePhysicalMemory; $used = $total - $free; $percentage = ($used / $total) * 100; Write-Output ('{0:N2}' -f $percentage)"
+      register: memory_windows
+      changed_when: false
+      ignore_errors: yes
+      when: is_windows
+      failed_when: false
+
+    - name: Set Memory Fact for Windows
+      set_fact:
+        memory: "{{ memory_windows.stdout }}"
+      when: is_windows and memory_windows.stdout is defined
+
+    # ============================================
+    # UPTIME CHECK - LINUX
+    # ============================================
+    - name: Get Uptime - Linux
+      command: uptime -p
+      register: uptime
+      changed_when: false
+      ignore_errors: yes
+      when: not is_windows
+
+    # ============================================
+    # UPTIME CHECK - WINDOWS
+    # ============================================
+    - name: Get Uptime - Windows
+      shell: |
+        powershell.exe -Command "$uptime = (Get-Date) - (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime; $days = $uptime.Days; $hours = $uptime.Hours; $minutes = $uptime.Minutes; Write-Output 'up $days days, $hours hours, $minutes minutes'"
+      register: uptime_windows
+      changed_when: false
+      ignore_errors: yes
+      when: is_windows
+      failed_when: false
+
+    - name: Set Uptime Fact for Windows
+      set_fact:
+        uptime: "{{ uptime_windows.stdout }}"
+      when: is_windows and uptime_windows.stdout is defined
+
+    # ============================================
+    # SERVICE CHECKS - LINUX
+    # ============================================
+    - name: Check Services - Linux
+      shell: |
+        systemctl is-active {{ item }} 2>/dev/null || echo "Not Installed"
+      loop: "{{ services_to_check }}"
+      register: service_results
+      changed_when: false
+      ignore_errors: yes
+      when: not is_windows
+
+    # ============================================
+    # SERVICE CHECKS - WINDOWS
+    # ============================================
+    - name: Check Services - Windows
+      shell: |
+        powershell.exe -Command "try { $service = Get-Service -Name '{{ item }}' -ErrorAction Stop; Write-Output $service.Status } catch { Write-Output 'Not Installed' }"
+      loop: "{{ services_to_check }}"
+      register: service_results_windows
+      changed_when: false
+      ignore_errors: yes
+      when: is_windows
+      failed_when: false
+
+    - name: Set Service Results Fact
+      set_fact:
+        service_results: "{{ service_results_windows if is_windows else service_results }}"
+
+    - name: Build Service Dictionary
+      set_fact:
+        service_dict: "{{ service_dict | default({}) | combine({item.item: item.stdout}) }}"
+      loop: "{{ service_results.results }}"
+      when: item.stdout is defined
+
+    # ============================================
+    # IP ADDRESS CHECK - WINDOWS
+    # ============================================
+    - name: Get Windows IP Address
+      shell: |
+        ipconfig | grep "IPv4" | head -1 | awk '{print $NF}'
+      register: windows_ip
+      changed_when: false
+      ignore_errors: yes
+      when: is_windows
+
+    - name: Set Windows IP Fact
+      set_fact:
+        ansible_default_ipv4: "{{ {'address': windows_ip.stdout} }}"
+      when: is_windows and windows_ip.stdout is defined
+
+    # ============================================
+    # CREATE CSV REPORT
+    # ============================================
+    - name: Create CSV Header
+      delegate_to: localhost
+      run_once: true
+      copy:
+        dest: /tmp/infrastructure_report.csv
+        content: |
+          Status,Hostname,IP,OS Type,OS Distribution,OS Version,CPU%,Memory%,Uptime,Docker,CRIO,Kubelet,Kube-APIServer,Kafka,Redis,ElasticSearch,APISIX,Nginx,Jenkins,JenkinsAgent,Zookeeper,ETCD
+
+    - name: Append Host Information
+      delegate_to: localhost
+      lineinfile:
+        path: /tmp/infrastructure_report.csv
+        insertafter: EOF
+        line: >-
+          Success,
+          {{ ansible_hostname }},
+          {{ ansible_default_ipv4.address | default('N/A') }},
+          {{ os_type | default('Unknown') }},
+          {{ os_distribution | default('Unknown') }},
+          {{ os_version | default('Unknown') }},
+          {{ cpu.stdout | default('Failed') | trim }},
+          {{ memory.stdout | default('Failed') | trim }},
+          "{{ uptime.stdout | default('Failed') | trim }}",
+          {{ service_dict.docker | default('N/A') }},
+          {{ service_dict.crio | default('N/A') }},
+          {{ service_dict.kubelet | default('N/A') }},
+          {{ service_dict['kube-apiserver'] | default('N/A') }},
+          {{ service_dict.kafka | default('N/A') }},
+          {{ service_dict['redis-server'] | default(service_dict.redis | default('N/A')) }},
+          {{ service_dict.elasticsearch | default('N/A') }},
+          {{ service_dict.apisix | default('N/A') }},
+          {{ service_dict.nginx | default('N/A') }},
+          {{ service_dict.jenkins | default('N/A') }},
+          {{ service_dict['jenkins-agent'] | default('N/A') }},
+          {{ service_dict.zookeeper | default('N/A') }},
+          {{ service_dict.etcd | default('N/A') }}
+      when: not (ansible_default_ipv4.address is undefined)
+
+    - name: Record Failed Hosts
+      set_fact:
+        failed_hosts: "{{ failed_hosts + [{'hostname': ansible_hostname, 'ip': ansible_default_ipv4.address | default('Unknown'), 'os': os_type | default('Unknown'), 'distro': os_distribution | default('Unknown'), 'version': os_version | default('Unknown')}] }}"
+      when: 
+        - (cpu is failed or memory is failed or uptime is failed)
+        - ansible_default_ipv4.address is defined
+
+- name: Generate Final Summary Report
+  hosts: localhost
+  gather_facts: yes
+  run_once: true
+  vars:
+    total_hosts: "{{ groups['all'] | length }}"
+    successful_hosts: "{{ total_hosts - (failed_hosts | default([]) | length) }}"
+  
+  tasks:
+    - name: Generate OS Distribution Summary
+      set_fact:
+        os_summary: |
+          {% set os_dict = {} %}
+          {% for host in groups['all'] %}
+            {% set os_dist = hostvars[host].os_distribution | default('Unknown') %}
+            {% set os_ver = hostvars[host].os_version | default('Unknown') %}
+            {% set os_type = hostvars[host].os_type | default('Unknown') %}
+            {% if os_type == 'Win32NT' %}
+              {% set os_key = 'Windows ' + os_ver %}
+            else %}
+              {% set os_key = os_dist + ' ' + os_ver %}
+            {% endif %}
+            {% set _ = os_dict.update({os_key: os_dict.get(os_key, 0) + 1}) %}
+          {% endfor %}
+          {% for os, count in os_dict.items() %}
+          - {{ os }}: {{ count }} host(s)
+          {% endfor %}
+
+    - name: Generate Windows Hosts List
+      set_fact:
+        windows_hosts: |
+          {% set windows_list = [] %}
+          {% for host in groups['all'] %}
+            {% if hostvars[host].os_type | default('') == 'Win32NT' %}
+              {% set _ = windows_list.append(host + ' (' + (hostvars[host].ansible_default_ipv4.address | default('Unknown IP')) + ')') %}
+            {% endif %}
+          {% endfor %}
+          {% for host in windows_list %}
+          - {{ host }}
+          {% endfor %}
+
+    - name: Create Final Summary Report
+      copy:
+        dest: /tmp/final_summary_report.txt
+        content: |
+          ==================================================
+          INFRASTRUCTURE HEALTH CHECK SUMMARY REPORT
+          ==================================================
+          Generated: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          
+          TOTAL HOSTS PROCESSED: {{ total_hosts }}
+          SUCCESSFUL HOSTS: {{ successful_hosts }}
+          FAILED HOSTS: {{ failed_hosts | default([]) | length }}
+          
+          ==================================================
+          WINDOWS HOSTS DETECTED
+          ==================================================
+          {% if windows_hosts | length > 0 %}
+          Total Windows Hosts: {{ windows_hosts | length }}
+          {{ windows_hosts }}
+          {% else %}
+          No Windows hosts detected in the inventory
+          {% endif %}
+          
+          ==================================================
+          FAILED HOSTS DETAILS
+          ==================================================
+          {% if failed_hosts | default([]) | length > 0 %}
+          {% for host in failed_hosts %}
+          Hostname: {{ host.hostname }}
+          IP Address: {{ host.ip }}
+          OS Type: {{ host.os }}
+          Distribution: {{ host.distro }}
+          Version: {{ host.version }}
+          Reason: Check CPU/Memory/Uptime collection failures
+          ------------------------------------------------
+          {% endfor %}
+          {% else %}
+          ✓ No hosts failed during the health check!
+          {% endif %}
+          
+          ==================================================
+          OS DISTRIBUTION SUMMARY
+          ==================================================
+          {{ os_summary }}
+          
+          ==================================================
+          CSV REPORT LOCATION
+          ==================================================
+          Detailed CSV report: /tmp/infrastructure_report.csv
+          
+          ==================================================
+          END OF REPORT
+          ==================================================
+
+    - name: Display Final Summary
+      debug:
+        msg:
+          - "========================================="
+          - "PLAYBOOK EXECUTION COMPLETED!"
+          - "========================================="
+          - "Total hosts: {{ total_hosts }}"
+          - "Successful: {{ successful_hosts }}"
+          - "Failed: {{ failed_hosts | default([]) | length }}"
+          - "Windows Hosts: {{ windows_hosts | length }}"
+          - "========================================="
+          - "Reports generated:"
+          - "  • CSV Report: /tmp/infrastructure_report.csv"
+          - "  • Summary Report: /tmp/final_summary_report.txt"
+          - "========================================="

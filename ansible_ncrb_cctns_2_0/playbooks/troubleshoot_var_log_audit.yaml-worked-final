@@ -1,0 +1,87 @@
+---
+- name: Extend /var/log/audit first, then compress old logs
+  hosts: all
+  gather_facts: yes
+  become: yes
+  vars:
+    target_size_gb: 11          # increased to 11GB to handle 100% full cases
+    usage_threshold: 80
+    audit_mount: /var/log/audit
+
+  tasks:
+    # 1. Get mount info
+    - name: Get mount info for audit
+      set_fact:
+        audit_mount_info: "{{ ansible_mounts | selectattr('mount', 'equalto', audit_mount) | first }}"
+      when: ansible_mounts | selectattr('mount', 'equalto', audit_mount) | list | length > 0
+
+    - name: Fail if /var/log/audit is not a separate mount
+      fail:
+        msg: "/var/log/audit is not a separate filesystem"
+      when: audit_mount_info is not defined
+
+    # 2. Compute current size and usage as floats
+    - name: Calculate current size and usage
+      set_fact:
+        current_size_gb: "{{ (audit_mount_info.size_total / (1024**3)) | float }}"
+        usage_percent: "{{ ((audit_mount_info.size_total - audit_mount_info.size_available) / audit_mount_info.size_total * 100) | float }}"
+
+    # 3. Extend LV **first** (only if usage > threshold AND size < target)
+    - block:
+        - name: Extract VG and LV names from device
+          set_fact:
+            device: "{{ audit_mount_info.device }}"
+            vg_name: "{{ audit_mount_info.device | regex_replace('^/dev/mapper/([^-]+)-.*', '\\1') }}"
+            lv_name: "{{ audit_mount_info.device | regex_replace('^/dev/mapper/[^-]+-(.*)$', '\\1') }}"
+
+        - name: Display VG/LV info
+          debug:
+            msg: "Device {{ device }} → VG: {{ vg_name }}, LV: {{ lv_name }}"
+
+        - name: Get VG free space in GB
+          shell: "vgs --units g --noheadings --options vg_free --nosuffix {{ vg_name }} | tr -d ' '"
+          register: vg_free_output
+          changed_when: false
+
+        - name: Parse VG free space as float
+          set_fact:
+            vg_free_gb: "{{ vg_free_output.stdout | float }}"
+
+        - name: Check if VG has enough free space
+          fail:
+            msg: "VG {{ vg_name }} has only {{ vg_free_gb }}G free, need {{ (target_size_gb - current_size_gb) | float }}G. Skipping extension."
+          when: (vg_free_gb | float) < ((target_size_gb - (current_size_gb | float)) | float)
+          ignore_errors: yes
+          register: vg_check
+
+        - name: Extend logical volume to {{ target_size_gb }}G
+          lvol:
+            vg: "{{ vg_name }}"
+            lv: "{{ lv_name }}"
+            size: "{{ target_size_gb }}G"
+            force: yes
+          when: vg_check is not failed
+
+        - name: Resize XFS filesystem on {{ audit_mount }}
+          command: xfs_growfs {{ audit_mount }}
+          register: growfs_result
+          changed_when: "'data blocks changed' in growfs_result.stdout"
+          when: vg_check is not failed
+
+        - name: Display success message
+          debug:
+            msg: "Successfully extended {{ audit_mount }} to {{ target_size_gb }}G on {{ inventory_hostname }}"
+          when: vg_check is not failed
+
+      when:
+        - usage_percent | float > usage_threshold
+        - current_size_gb | float < target_size_gb
+
+    # 4. **After** extension (or for hosts already big enough), compress old logs
+    - name: Compress uncompressed rotated audit logs
+      shell: |
+        find {{ audit_mount }} -maxdepth 1 -name "audit.log.[0-9]*" ! -name "*.gz" -exec gzip {} \; -print
+      register: compress_result
+      changed_when: compress_result.stdout | trim != ""
+      when: usage_percent | float > usage_threshold
+      ignore_errors: yes   # prevent playbook abort if compression fails (e.g., still no space)

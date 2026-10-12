@@ -1,0 +1,46 @@
+---
+- name: Install Node.js 22.x on RHEL 9
+  hosts: all
+  become: yes
+  vars:
+    nodesource_repo_path: /etc/yum.repos.d/nodesource-nodejs.repo
+
+  tasks:
+
+    - name: Ensure NodeSource repo file is present
+      copy:
+        dest: "{{ nodesource_repo_path }}"
+        content: |
+          [nodesource-nodejs]
+          name=Node.js Packages for Linux RPM based distros - x86_64
+          baseurl=https://rpm.nodesource.com/pub_22.x/nodistro/nodejs/x86_64
+          priority=9
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://rpm.nodesource.com/gpgkey/ns-operations-public.key
+          module_hotfixes=1
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Import NodeSource GPG key
+      rpm_key:
+        state: present
+        key: https://rpm.nodesource.com/gpgkey/ns-operations-public.key
+
+    - name: Ensure dnf cache is updated
+      dnf:
+        update_cache: yes
+
+    - name: Install Node.js
+      dnf:
+        name: nodejs
+        state: present
+
+    - name: Verify Node.js installation
+      command: node -v
+      register: node_version
+
+    - name: Print Node.js version
+      debug:
+        msg: "Installed Node.js version is {{ node_version.stdout }}"

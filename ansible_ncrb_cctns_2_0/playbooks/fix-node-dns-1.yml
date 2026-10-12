@@ -1,0 +1,69 @@
+---
+- name: Configure node DNS without stopping DHCP DNS
+  hosts: all_workers
+  become: true
+  gather_facts: true
+  serial: 5
+
+  vars:
+    corporate_dns: "10.212.174.160"
+    search_domain: "~uat.gov.in"
+    resolved_conf: /etc/systemd/resolved.conf
+    backup_dir: /var/backups/dns
+
+  tasks:
+
+    - name: Ensure backup directory exists
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Backup existing resolved.conf
+      copy:
+        src: "{{ resolved_conf }}"
+        dest: "{{ backup_dir }}/resolved.conf.{{ ansible_date_time.iso8601 }}"
+        remote_src: true
+
+    - name: Configure systemd-resolved (add corporate DNS, keep DHCP DNS)
+      copy:
+        dest: "{{ resolved_conf }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Resolve]
+          DNS={{ corporate_dns }}
+          Domains={{ search_domain }}
+
+    - name: Restart NetworkManager
+      service:
+        name: NetworkManager
+        state: restarted
+
+    - name: Restart systemd-resolved
+      service:
+        name: systemd-resolved
+        state: restarted
+
+    - name: Verify runtime DNS
+      command: resolvectl status
+      register: dns_status
+      changed_when: false
+
+    - name: Show DNS status
+      debug:
+        msg: "{{ dns_status.stdout_lines }}"
+
+    - name: Assert corporate DNS is present
+      assert:
+        that:
+          - "'{{ corporate_dns }}' in dns_status.stdout"
+        fail_msg: "Corporate DNS not active"
+        success_msg: "Corporate DNS active (DHCP DNS preserved)"
+
+    - name: Test registry DNS resolution
+      command: nslookup cctns.registry.uat.gov.in
+      register: nslookup_test
+      changed_when: false
+      failed_when: nslookup_test.rc != 0

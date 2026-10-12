@@ -1,0 +1,104 @@
+---
+- name: Configure Jenkins JNLP Agent on RHEL Workers
+  hosts: all
+  become: yes
+  vars:
+    jenkins_home: /var/lib/jenkins
+    jenkins_user: jenkins
+    jenkins_group: root
+    agent_jar_src: /home/cctnscloud/ansible/files/agent.jar
+    agent_jar_dest: /var/lib/jenkins/agent.jar
+    ca_cert_src: /home/cctnscloud/ansible/files/mkcert-rootCA.pem
+    ca_cert_dest: /etc/pki/ca-trust/source/anchors/mkcert-rootCA.pem
+    jenkins_url: https://cctns.jenkins.ncrb.in:9090/
+    java_package: java-21-openjdk-devel  # Java 21
+
+  tasks:
+
+    - name: Install Java 21 (OpenJDK)
+      dnf:
+        name: "{{ java_package }}"
+        state: present
+
+    - name: Ensure jenkins user exists (create if not present)
+      user:
+        name: "{{ jenkins_user }}"
+        system: yes
+        shell: /bin/bash
+        create_home: no
+        state: present
+
+    - name: Ensure Jenkins home directory exists
+      file:
+        path: "{{ jenkins_home }}"
+        state: directory
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_group }}"
+        mode: '0755'
+
+    - name: Ensure recursive ownership jenkins:root on Jenkins home
+      file:
+        path: "{{ jenkins_home }}"
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_group }}"
+        recurse: yes
+
+    - name: Copy mkcert root CA to trust anchors
+      copy:
+        src: "{{ ca_cert_src }}"
+        dest: "{{ ca_cert_dest }}"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Update CA trust
+      command: update-ca-trust
+      changed_when: false
+
+    - name: Copy Jenkins agent.jar
+      copy:
+        src: "{{ agent_jar_src }}"
+        dest: "{{ agent_jar_dest }}"
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_group }}"
+        mode: '0644'
+
+    - name: Create systemd service for Jenkins agent
+      copy:
+        dest: /etc/systemd/system/jenkins-agent.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Jenkins Java Microservices Agent
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory={{ jenkins_home }}
+          ExecStart=/usr/bin/java -jar {{ agent_jar_dest }} \
+            -url {{ jenkins_url }} \
+            -secret {{ jenkins_agent_secret }} \
+            -name "{{ jenkins_agent_name }}" \
+            -webSocket \
+            -workDir "{{ jenkins_home }}"
+          Restart=always
+          RestartSec=10
+          StandardOutput=syslog
+          StandardError=syslog
+          SyslogIdentifier=jenkins-agent
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start Jenkins agent
+      systemd:
+        name: jenkins-agent
+        enabled: yes
+        state: started

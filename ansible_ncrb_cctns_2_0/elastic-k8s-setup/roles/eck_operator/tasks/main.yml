@@ -1,0 +1,50 @@
+---
+- name: Check Kubernetes connectivity
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: v1
+    kind: Namespace
+    name: elastic-system
+  register: elastic_namespace
+
+
+- name: Fail if elastic-system namespace does not exist
+  fail:
+    msg: "elastic-system namespace does not exist"
+  when:
+    - elastic_namespace.resources | length == 0
+
+
+- name: Apply ECK CRDs
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "{{ eck_crd_file }}"
+
+
+- name: Deploy ECK Operator
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "{{ eck_operator_file }}"
+
+
+- name: Wait for ECK operator statefulset
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: apps/v1
+    kind: StatefulSet
+    namespace: elastic-system
+    name: elastic-operator
+  register: eck_status
+
+  until:
+    - eck_status.resources | length > 0
+    - eck_status.resources[0].status.readyReplicas | default(0) | int > 0
+
+  retries: 30
+  delay: 10
+
+- name: ECK operator installation completed
+  debug:
+    msg: "ECK Operator 3.4.1 installed successfully"

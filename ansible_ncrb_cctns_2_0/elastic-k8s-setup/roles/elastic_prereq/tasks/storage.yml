@@ -1,0 +1,272 @@
+---
+
+#################################################
+# Determine whether Elasticsearch storage
+# is required on this node
+#################################################
+
+- name: Determine whether node requires Elasticsearch storage
+  ansible.builtin.set_fact:
+    elastic_storage_required: >-
+      {{
+        'elastic-kubernetes-worker-nodes-esmaster' in group_names
+        or
+        'elastic-kubernetes-worker-nodes-esdata' in group_names
+      }}
+
+#################################################
+# Elasticsearch storage
+# ONLY MASTER AND DATA NODES
+#################################################
+
+- name: Check Elasticsearch disk exists
+  ansible.builtin.stat:
+    path: "{{ elastic_disk }}"
+  register: disk_status
+  when: elastic_storage_required
+
+- name: Fail if Elasticsearch disk is missing
+  ansible.builtin.fail:
+    msg: "Disk {{ elastic_disk }} not found."
+  when:
+    - elastic_storage_required
+    - not disk_status.stat.exists
+
+#################################################
+# Determine partition size
+#################################################
+
+- name: Set Elasticsearch partition size
+  ansible.builtin.set_fact:
+    elastic_partition_end: >-
+      {{
+        '290GiB'
+        if 'elastic-kubernetes-worker-nodes-esmaster' in group_names
+        else '970GiB'
+      }}
+  when: elastic_storage_required
+
+#################################################
+# Create GPT partition
+#################################################
+
+- name: Create GPT partition
+  community.general.parted:
+    device: "{{ elastic_disk }}"
+    label: gpt
+    number: 1
+    state: present
+    part_start: 1MiB
+    part_end: "{{ elastic_partition_end }}"
+  when: elastic_storage_required
+
+#################################################
+# Reload partition table
+#################################################
+
+- name: Reload partition table
+  ansible.builtin.command:
+    cmd: "partprobe {{ elastic_disk }}"
+  changed_when: false
+  when: elastic_storage_required
+
+#################################################
+# Create Volume Group
+#################################################
+
+- name: Create Elasticsearch Volume Group
+  community.general.lvg:
+    vg: "{{ elastic_vg_name }}"
+    pvs: "{{ elastic_disk }}1"
+  when: elastic_storage_required
+
+#################################################
+# Check existing Elasticsearch LV
+#################################################
+
+- name: Check if Elasticsearch LV exists
+  ansible.builtin.command:
+    cmd: "lvs --noheadings -o lv_name {{ elastic_vg_name }}"
+  register: existing_lv
+  changed_when: false
+  failed_when: false
+  when: elastic_storage_required
+
+#################################################
+# Create Elasticsearch LV
+#################################################
+
+- name: Create Elasticsearch Logical Volume
+  community.general.lvol:
+    vg: "{{ elastic_vg_name }}"
+    lv: "{{ elastic_lv_name }}"
+    size: 100%FREE
+    state: present
+  when:
+    - elastic_storage_required
+    - elastic_lv_name not in existing_lv.stdout
+
+#################################################
+# Create XFS filesystem
+#################################################
+
+- name: Create Elasticsearch XFS filesystem
+  ansible.builtin.filesystem:
+    fstype: xfs
+    dev: "/dev/{{ elastic_vg_name }}/{{ elastic_lv_name }}"
+  when: elastic_storage_required
+
+#################################################
+# Create Elasticsearch mount point
+#################################################
+
+- name: Create Elasticsearch mount directory
+  ansible.builtin.file:
+    path: "{{ elastic_mount_point }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: elastic_storage_required
+
+#################################################
+# Mount Elasticsearch filesystem
+#################################################
+
+- name: Mount Elasticsearch filesystem
+  ansible.posix.mount:
+    path: "{{ elastic_mount_point }}"
+    src: "/dev/{{ elastic_vg_name }}/{{ elastic_lv_name }}"
+    fstype: xfs
+    opts: defaults,noatime
+    state: mounted
+  when: elastic_storage_required
+
+#################################################
+# Create master data directory
+#################################################
+
+- name: Create master data directory
+  ansible.builtin.file:
+    path: "{{ master_data_dir }}"
+    state: directory
+    owner: "{{ elastic_uid }}"
+    group: "{{ elastic_gid }}"
+    mode: "0750"
+  when:
+    - "'elastic-kubernetes-worker-nodes-esmaster' in group_names"
+
+#################################################
+# Create data node directory
+#################################################
+
+- name: Create data node directory
+  ansible.builtin.file:
+    path: "{{ data_data_dir }}"
+    state: directory
+    owner: "{{ elastic_uid }}"
+    group: "{{ elastic_gid }}"
+    mode: "0750"
+  when:
+    - "'elastic-kubernetes-worker-nodes-esdata' in group_names"
+
+
+#################################################
+# /var STORAGE
+# ALL NODES
+#################################################
+
+- name: Check /var filesystem type
+  ansible.builtin.command:
+    cmd: findmnt -no FSTYPE /var
+  register: var_fstype
+  changed_when: false
+
+- name: Fail if /var is not XFS
+  ansible.builtin.fail:
+    msg: "/var must use XFS. Detected filesystem: {{ var_fstype.stdout | trim }}"
+  when: var_fstype.stdout | trim != "xfs"
+
+#################################################
+# Get current /var LV size
+#################################################
+
+- name: Get current /var LV size
+  ansible.builtin.command:
+    cmd: lvs --noheadings --nosuffix --units g -o LV_SIZE vg_os/lv_var
+  register: var_lv_size
+  changed_when: false
+
+- name: Show current /var LV size
+  ansible.builtin.debug:
+    msg: "Current /var LV size: {{ var_lv_size.stdout | trim }} GiB"
+
+#################################################
+# Get free space in vg_os
+#################################################
+
+- name: Get free space in vg_os
+  ansible.builtin.command:
+    cmd: vgs --noheadings --nosuffix --units g -o VG_FREE vg_os
+  register: var_vg_free
+  changed_when: false
+
+- name: Show free space in vg_os
+  ansible.builtin.debug:
+    msg: "Free space in vg_os: {{ var_vg_free.stdout | trim }} GiB"
+
+#################################################
+# Check enough VG space
+#################################################
+
+- name: Fail if vg_os does not have enough free space
+  ansible.builtin.fail:
+    msg: >-
+      Cannot extend /var to 25GiB.
+      Current /var size: {{ var_lv_size.stdout | trim }}GiB.
+      Required additional space:
+      {{ (25 - (var_lv_size.stdout | trim | float)) | round(2) }}GiB.
+      Available in vg_os:
+      {{ var_vg_free.stdout | trim }}GiB.
+  when:
+    - (var_lv_size.stdout | trim | float) < 25
+    - (var_vg_free.stdout | trim | float) <
+      (25 - (var_lv_size.stdout | trim | float))
+
+#################################################
+# Extend /var LV
+#################################################
+
+- name: Extend /var LV to 25GiB
+  community.general.lvol:
+    vg: vg_os
+    lv: lv_var
+    size: 25g
+    resizefs: false
+    state: present
+  when:
+    - (var_lv_size.stdout | trim | float) < 25
+
+#################################################
+# Grow XFS
+#################################################
+
+- name: Grow XFS filesystem on /var
+  ansible.builtin.command:
+    cmd: xfs_growfs /var
+  when:
+    - (var_lv_size.stdout | trim | float) < 25
+
+#################################################
+# Verify /var
+#################################################
+
+- name: Get final /var filesystem size
+  ansible.builtin.command:
+    cmd: df -h /var
+  register: var_final_size
+  changed_when: false
+
+- name: Show final /var filesystem size
+  ansible.builtin.debug:
+    var: var_final_size.stdout_lines

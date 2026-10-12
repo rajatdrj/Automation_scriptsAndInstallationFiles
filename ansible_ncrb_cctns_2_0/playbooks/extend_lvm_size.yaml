@@ -1,0 +1,38 @@
+---
+- name: Extend LVM partitions if usage > 80% and VG has >10GB free
+  hosts: all
+  gather_facts: yes
+  become: yes
+  vars:
+    min_vg_free_gb: 10
+    extend_size: +5G
+    usage_threshold: 70         # only extend if usage > this %
+
+  tasks:
+    - name: Get VG free space mapping
+      shell: |
+        vgs --noheadings --units g --options vg_name,vg_free --nosuffix 2>/dev/null | awk '{print $1 ":" $2}'
+      register: vgs_raw
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Parse VG free space into dictionary
+      set_fact:
+        vg_free_map: "{{ dict(vgs_raw.stdout_lines | map('split', ':') | list) }}"
+      when: vgs_raw.stdout != ""
+      ignore_errors: yes
+
+    - name: Fallback to empty dictionary if no output
+      set_fact:
+        vg_free_map: {}
+      when: vg_free_map is not defined
+
+    - name: Process each LVM mount point (XFS only)
+      include_tasks: extend_lvm_tasks.yaml
+      loop: "{{ ansible_mounts }}"
+      loop_control:
+        loop_var: mount_item
+      when:
+        - mount_item.device is defined
+        - mount_item.device.startswith('/dev/mapper/')
+        - mount_item.fstype == 'xfs'

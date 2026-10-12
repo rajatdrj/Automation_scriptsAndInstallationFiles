@@ -1,0 +1,59 @@
+---
+- name: Configure containerd registry CA for Nexus
+  hosts: all_workers
+  become: true
+  gather_facts: false
+  serial: 5   # safe rollout
+
+  vars:
+    registry_host: "cctns.registry.uat.gov.in:5042"
+    certs_dir: "/etc/containerd/certs.d/{{ registry_host }}"
+    ca_src: "/home/cctnscloud/ansible/files/mkcert-rootCA.pem"
+    ca_dest: "{{ certs_dir }}/ca.crt"
+
+  tasks:
+
+    # --------------------------------------------------
+    # STEP 1: Create containerd certs directory
+    # --------------------------------------------------
+    - name: Ensure containerd registry cert directory exists
+      file:
+        path: "{{ certs_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # --------------------------------------------------
+    # STEP 2: Copy Nexus CA certificate
+    # --------------------------------------------------
+    - name: Copy Nexus registry CA certificate
+      copy:
+        src: "{{ ca_src }}"
+        dest: "{{ ca_dest }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart containerd
+
+    # --------------------------------------------------
+    # STEP 3: Verify CA file presence (audit)
+    # --------------------------------------------------
+    - name: Verify CA certificate exists
+      stat:
+        path: "{{ ca_dest }}"
+      register: ca_stat
+
+    - name: Assert CA certificate copied successfully
+      assert:
+        that:
+          - ca_stat.stat.exists
+        fail_msg: "CA certificate not found at {{ ca_dest }}"
+        success_msg: "CA certificate installed successfully"
+
+  handlers:
+    - name: restart containerd
+      service:
+        name: containerd
+        state: restarted
+

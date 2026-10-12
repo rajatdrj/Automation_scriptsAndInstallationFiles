@@ -1,0 +1,50 @@
+---
+- name: Fix Kubernetes node DNS permanently (Ubuntu 22.04 safe)
+  hosts: all
+  become: true
+  gather_facts: true
+  serial: 5
+
+  vars:
+    primary_dns: "10.212.174.160"
+    search_domain: "uat.gov.in"
+
+  tasks:
+
+    ############################################################
+    # Get active NetworkManager connection
+    ############################################################
+    - name: Get active NetworkManager connection
+      command: nmcli -t -f NAME,DEVICE con show --active
+      register: nm_conn
+      changed_when: false
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Set connection name fact
+      set_fact:
+        nm_connection: "{{ nm_conn.stdout_lines[0].split(':')[0] }}"
+      when: ansible_facts.os_family == "Debian"
+
+    ############################################################
+    # Set DNS (DO NOT TOUCH SECONDARY)
+    ############################################################
+    - name: Configure primary DNS only (do not override others)
+      command: >
+        nmcli con modify "{{ nm_connection }}"
+        ipv4.dns "{{ primary_dns }}"
+        ipv4.dns-search "{{ search_domain }}"
+        ipv4.ignore-auto-dns yes
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Reload NetworkManager connection
+      command: nmcli con up "{{ nm_connection }}"
+      when: ansible_facts.os_family == "Debian"
+
+    ############################################################
+    # Validation (correct test)
+    ############################################################
+    - name: Test resolution using glibc resolver
+      command: getent hosts cctns.registry.uat.gov.in
+      register: dns_test
+      changed_when: false
+      failed_when: false

@@ -1,0 +1,14 @@
+---
+
+- name: Install sysctl configuration
+  template:
+    src: sysctl-elasticsearch.conf.j2
+    dest: /etc/sysctl.d/99-elasticsearch.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+
+- name: Apply sysctl settings
+  command:
+    cmd: sysctl --system

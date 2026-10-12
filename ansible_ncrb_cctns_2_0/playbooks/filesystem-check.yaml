@@ -1,0 +1,111 @@
+---
+- name: Check filesystem usage and classify by severity (with VG free space)
+  hosts: all
+  gather_facts: yes
+  become: yes
+  vars:
+    threshold_medium: 70
+    threshold_high: 80
+    threshold_critical: 90
+
+  tasks:
+    - name: Get host IP
+      set_fact:
+        host_ip: "{{ ansible_default_ipv4.address | default(inventory_hostname) }}"
+
+    # ---- Build mount_details ----
+    - name: Build mount usage and classify
+      set_fact:
+        mount_details: "{{ mount_details | default([]) + [{
+            'mount': item.mount,
+            'percent': ((item.size_total - item.size_available) / item.size_total * 100),
+            'class': (
+              'critical' if ((item.size_total - item.size_available) / item.size_total * 100) > threshold_critical
+              else 'high' if ((item.size_total - item.size_available) / item.size_total * 100) > threshold_high
+              else 'medium' if ((item.size_total - item.size_available) / item.size_total * 100) > threshold_medium
+              else 'ok'
+            )
+          }] }}"
+      loop: "{{ ansible_mounts }}"
+      when:
+        - item.size_total is defined
+        - item.size_available is defined
+        - item.size_total > 0
+
+    # ---- Get VG free space ----
+    - name: Get VG free space mapping
+      shell: |
+        vgs --noheadings --units g --options vg_name,vg_free --nosuffix 2>/dev/null | awk '{print $1 ":" $2}'
+      register: vgs_raw
+      changed_when: false
+      ignore_errors: yes
+
+    # ---- Parse VG free space into dictionary ----
+    - name: Parse VG free space into dictionary
+      set_fact:
+        vg_free_map: "{{ dict(vgs_raw.stdout_lines | map('split', ':') | list) }}"
+      when: vgs_raw.stdout != ""
+      ignore_errors: yes
+
+    - name: Fallback to empty dictionary if no output
+      set_fact:
+        vg_free_map: {}
+      when: vg_free_map is not defined
+
+    # ---- Split into severity classes ----
+    - name: Filter mounts by class
+      set_fact:
+        critical_mounts: "{{ mount_details | selectattr('class', 'equalto', 'critical') | list }}"
+        high_mounts: "{{ mount_details | selectattr('class', 'equalto', 'high') | list }}"
+        medium_mounts: "{{ mount_details | selectattr('class', 'equalto', 'medium') | list }}"
+      when: mount_details is defined
+
+    - name: Set flags for each class
+      set_fact:
+        has_critical: "{{ critical_mounts | length > 0 }}"
+        has_high: "{{ high_mounts | length > 0 }}"
+        has_medium: "{{ medium_mounts | length > 0 }}"
+      when: mount_details is defined
+
+    # ---- Build the full report (including VG free column) ----
+    - name: Build report content
+      set_fact:
+        report_content: |
+          {% set header = "%-9s | %-15s | %-27s | %-8s | %s"|format("SEVERITY", "IP ADDRESS", "MOUNT", "VG FREE", "USAGE") %}
+          {% set sep = "%-9s | %-15s | %-27s | %-8s | %s"|format("---------", "-----------------", "---------------------------", "--------", "-------") %}
+          {{ header }}
+          {{ sep }}
+          {% for severity in ['critical', 'high', 'medium'] %}
+          {% set label = severity | upper %}
+          {% for host in ansible_play_hosts_all %}
+          {% if hostvars[host]['has_' + severity] is defined and hostvars[host]['has_' + severity] %}
+          {% for mount in hostvars[host][severity + '_mounts'] %}
+          {% set mount_info = hostvars[host]['ansible_mounts'] | selectattr('mount', 'equalto', mount.mount) | first | default(None) %}
+          {% set device = mount_info.device if mount_info else '' %}
+          {% set vg_free = 'N/A' %}
+          {% if device and '/dev/mapper/' in device %}
+            {% set vg_name = device | regex_replace('^/dev/mapper/([^-]+)-.*', '\\1') %}
+            {% set vg_free = hostvars[host]['vg_free_map'][vg_name] | default('N/A') %}
+          {% endif %}
+          {{ "%-9s | %-15s | %-27s | %-8s | %s"|format(label, hostvars[host]['host_ip'], mount.mount, vg_free, (mount.percent | round(2) ~ '%')) }}
+          {% endfor %}
+          {% endif %}
+          {% endfor %}
+          {% endfor %}
+      run_once: true
+      delegate_to: localhost
+
+    # ---- Write report to /tmp/disk_report.txt ----
+    - name: Write report to /tmp/disk_report.txt
+      copy:
+        content: "{{ report_content }}"
+        dest: /tmp/disk_report.txt
+      run_once: true
+      delegate_to: localhost
+
+    # ---- (Optional) display the report in debug output ----
+    - name: Display report (debug)
+      debug:
+        msg: "{{ report_content }}"
+      run_once: true
+      delegate_to: localhost

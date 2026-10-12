@@ -1,0 +1,12 @@
+---
+- name: Check uptime of all VMs
+  hosts: all
+  become: yes  # If you need to run as root
+  tasks:
+    - name: Get system uptime in 'YYYY-MM-DD HH:MM:SS' format
+      command: uptime -s
+      register: uptime_result
+
+    - name: Show uptime for each host
+      debug:
+        msg: "Host {{ inventory_hostname }} has uptime: {{ uptime_result.stdout }}"

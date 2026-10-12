@@ -1,0 +1,38 @@
+---
+
+- name: Label Elasticsearch master worker nodes
+  command:
+
+    kubectl label node {{ inventory_hostname }} \
+    es-role=master --overwrite
+
+  delegate_to: "{{ groups['elastic-kubernetes-master-nodes'][0] }}"
+
+  when:
+    - "'elastic-kubernetes-worker-nodes-esmaster' in group_names"
+
+
+
+
+- name: Label Elasticsearch data worker nodes
+  command:
+
+    kubectl label node {{ inventory_hostname }} \
+    es-role=data --overwrite
+
+  delegate_to: "{{ groups['elastic-kubernetes-master-nodes'][0] }}"
+
+  when:
+    - "'elastic-kubernetes-worker-nodes-esdata' in group_names"
+
+
+- name: Label Elasticsearch coordinating worker nodes
+  command:
+
+    kubectl label node {{ inventory_hostname }} 
+    es-role=coordinator --overwrite
+
+  delegate_to: "{{ groups['elastic-kubernetes-master-nodes'][0] }}"
+
+  when:
+    - "'elastic-kubernetes-worker-nodes-escoordinating' in group_names"

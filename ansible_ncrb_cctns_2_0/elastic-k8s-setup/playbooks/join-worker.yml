@@ -1,0 +1,9 @@
+---
+- hosts: elastic-kubernetes-worker-nodes
+  become: yes
+
+  roles:
+    - common
+    - containerd
+    - kubernetes
+    - worker

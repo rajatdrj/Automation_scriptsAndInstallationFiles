@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${SERVICE_NAME}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${SERVICE_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${SERVICE_NAME}
+      annotations:
+        configmap.reloader.stakater.com/reload: ${SERVICE_NAME}-uat
+
+    spec:
+      hostAliases:
+        - ip: "10.212.113.52"
+          hostnames:
+            - "kafka"
+        - ip: "10.212.113.27"
+          hostnames:
+            - "cctns.kafka1.ncrb.in"
+        - ip: "10.212.113.69"
+          hostnames:
+            - "cctns.kafka2.ncrb.in"
+        - ip: "10.212.113.49"
+          hostnames:
+            - "cctns.kafka3.ncrb.in"
+        - ip: "10.212.107.94"
+          hostnames:
+            - "cctns.apisix.pg.gov.in"
+
+      serviceAccountName: cctns-service-account
+
+      containers:
+        - name: ${SERVICE_NAME}
+          image: cctns.registry.uat.gov.in:5043/${SERVICE_NAME}:1.0.1
+
+          ports:
+            - containerPort: ${APP_PORT}
+
+          envFrom:
+            - configMapRef:
+                name: ${SERVICE_NAME}-uat
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${SERVICE_NAME}
+spec:
+  selector:
+    app: ${SERVICE_NAME}
+  ports:
+    - protocol: TCP
+      port: ${APP_PORT}
+      targetPort: ${APP_PORT}
+  type: NodePort

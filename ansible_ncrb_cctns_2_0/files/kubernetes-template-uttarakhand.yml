@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${SERVICE_NAME}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${SERVICE_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${SERVICE_NAME}
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "uk-cctns-uat-role"
+        vault.hashicorp.com/agent-limits-cpu: ""
+        vault.hashicorp.com/agent-requests-cpu: ""
+        vault.hashicorp.com/agent-limits-mem: ""
+        vault.hashicorp.com/agent-requests-mem: ""
+        vault.hashicorp.com/agent-inject-secret-application-properties: "${VAULT_SECRETS_UTTARAKHAND}"
+        vault.hashicorp.com/agent-inject-template-application-properties: |
+          ${VAULT_TEMPLATE_UTTARAKHAND}
+        vault.hashicorp.com/agent-inject-file-application-properties: "application.properties"
+    spec:
+      hostAliases:
+        - ip: "10.212.113.65"
+          hostnames:
+            - "cctns.objstore.gov.in"
+      serviceAccountName: uat-uttarakhand-sa
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: state
+                    operator: In
+                    values:
+                      - uttarakhand
+                  - key: tier
+                    operator: In
+                    values:
+                      - backend
+      containers:
+        - name: ${SERVICE_NAME}
+          image: cctns.registry.uat.gov.in:5043/${SERVICE_NAME}:1.0.23
+          ports:
+            - containerPort: ${APP_PORT}
+          envFrom:
+            - configMapRef:
+                name: ${SERVICE_NAME}-uat-uttarakhand
+            - configMapRef:
+                name: common-config-uat-uttarakhand
+          volumeMounts:
+            - name: kafka-certs-vol
+              mountPath: /app/kafka-certs
+              readOnly: true
+            - name: kafka-dev-certs-vol
+              mountPath: /app/kafka-certs-dev
+              readOnly: true
+
+      volumes:
+        - name: kafka-dev-certs-vol
+          secret:
+            secretName: kafka-dev-certs
+        - name: kafka-certs-vol
+          secret:
+            secretName: kafka-uttarakhand-certs
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${SERVICE_NAME}
+spec:
+  selector:
+    app: ${SERVICE_NAME}
+  ports:
+    - protocol: TCP
+      port: ${APP_PORT}
+      targetPort: ${APP_PORT}
+  type: ClusterIP

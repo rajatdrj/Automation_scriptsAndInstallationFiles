@@ -1,0 +1,468 @@
+---
+- name: Install separate Jenkins test controller
+  hosts: jenkins_target
+  become: true
+  gather_facts: true
+
+  vars:
+    jenkins_home: /var/lib/jenkins
+    jenkins_setup_dir: /home/cctnscloud/jenkins-setup
+    jenkins_port: 9090
+    jenkins_service_name: jenkins
+    jenkins_user: jenkins
+    jenkins_group: jenkins
+
+    # Replace with the real, reachable proxy. This playbook fails if unchanged.
+    jenkins_proxy_host: "192.0.2.12"
+    jenkins_proxy_port: 8080
+    jenkins_no_proxy_hosts:
+      - "10.212.107.97"
+      - "10.212.107.106"
+      - "cctns.git.ncrb.in"
+      - "10.212.113.47"
+      - "10.212.113.65"
+      - "10.212.107.119"
+
+    jenkins_latest_version_url: "https://updates.jenkins.io/stable/latestCore.txt"
+    jenkins_war_file: "{{ jenkins_setup_dir }}/jenkins.war"
+    jenkins_plugins_manifest_controller: "/home/cctnscloud/ansible/files/jenkins-plugins.txt"
+    jenkins_plugins_manifest_target: "{{ jenkins_setup_dir }}/jenkins-plugins.txt"
+    jenkins_plugin_manager_jar: "{{ jenkins_setup_dir }}/jenkins-plugin-manager.jar"
+    jenkins_plugin_manager_release_api: "https://api.github.com/repos/jenkinsci/plugin-installation-manager-tool/releases/latest"
+
+    proxy_environment:
+      http_proxy: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+      https_proxy: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+      HTTP_PROXY: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+      HTTPS_PROXY: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+      no_proxy: "{{ jenkins_no_proxy_hosts | join(',') }}"
+      NO_PROXY: "{{ jenkins_no_proxy_hosts | join(',') }}"
+
+  tasks:
+    - name: Validate proxy configuration
+      ansible.builtin.assert:
+        that:
+          - jenkins_proxy_host | length > 0
+          - jenkins_proxy_port | int > 0
+        fail_msg: "Set a valid Jenkins proxy host and port."
+
+    - name: Check plugin manifest exists on Ansible controller
+      ansible.builtin.stat:
+        path: "{{ jenkins_plugins_manifest_controller }}"
+      delegate_to: localhost
+      become: false
+      register: controller_plugin_manifest
+
+    - name: Require plugin manifest
+      ansible.builtin.assert:
+        that:
+          - controller_plugin_manifest.stat.exists
+          - controller_plugin_manifest.stat.isreg
+        fail_msg: "Missing plugin manifest at {{ jenkins_plugins_manifest_controller }}"
+
+    - name: Check Java installation
+      ansible.builtin.command:
+        argv: [java, -version]
+      register: java_version
+      changed_when: false
+
+    - name: Find Java executable
+      ansible.builtin.command:
+        argv: [which, java]
+      register: java_path
+      changed_when: false
+
+    - name: Check existing Jenkins agent service without changing it
+      ansible.builtin.command:
+        argv: [systemctl, is-active, jenkins-agent.service]
+      register: existing_agent_status
+      changed_when: false
+      failed_when: false
+
+    - name: Check existing Jenkins home without changing it
+      ansible.builtin.stat:
+        path: /var/lib/jenkins
+      register: existing_jenkins_home
+
+    - name: Check whether target port is already in use
+      ansible.builtin.shell: "ss -lnt | awk '{print $4}' | grep -E '(^|:){{ jenkins_port }}$' || true"
+      args:
+        executable: /bin/bash
+      register: target_port_check
+      changed_when: false
+
+    - name: Require target port to be free
+      ansible.builtin.assert:
+        that:
+          - target_port_check.stdout | trim | length == 0
+        fail_msg: "Port {{ jenkins_port }} is already listening."
+
+    - name: Create Jenkins setup directory
+      ansible.builtin.file:
+        path: "{{ jenkins_setup_dir }}"
+        state: directory
+        owner: cctnscloud
+        group: users
+        mode: "0750"
+
+    - name: Create Jenkins group
+      ansible.builtin.group:
+        name: "{{ jenkins_group }}"
+        state: present
+        system: true
+
+    - name: Create Jenkins service user
+      ansible.builtin.user:
+        name: "{{ jenkins_user }}"
+        group: "{{ jenkins_group }}"
+        home: "{{ jenkins_home }}"
+        shell: /sbin/nologin
+        system: true
+        create_home: false
+        state: present
+
+    - name: Create Jenkins home directory
+      ansible.builtin.file:
+        path: "{{ jenkins_home }}"
+        state: directory
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_group }}"
+        mode: "0750"
+
+    - name: Create Jenkins plugins directory
+      ansible.builtin.file:
+        path: "{{ jenkins_home }}/plugins"
+        state: directory
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_group }}"
+        mode: "0755"
+
+    - name: Copy plugin manifest to target
+      ansible.builtin.copy:
+        src: "{{ jenkins_plugins_manifest_controller }}"
+        dest: "{{ jenkins_plugins_manifest_target }}"
+        owner: cctnscloud
+        group: users
+        mode: "0644"
+
+    - name: Test proxy access to Jenkins update service
+      ansible.builtin.uri:
+        url: "{{ jenkins_latest_version_url }}"
+        method: GET
+        return_content: true
+        timeout: 30
+        use_proxy: true
+        status_code: 200
+      environment: "{{ proxy_environment }}"
+      register: proxy_test
+      changed_when: false
+
+
+    - name: Test Jenkins update endpoint through proxy
+      ansible.builtin.uri:
+        url: "https://updates.jenkins.io/stable/latestCore.txt"
+        method: GET
+        status_code: 200
+        return_content: true
+        follow_redirects: all
+        use_proxy: true
+      environment:
+        http_proxy: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+        https_proxy: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+        HTTP_PROXY: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+        HTTPS_PROXY: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+      register: proxy_test
+      failed_when: false
+
+    - name: Display proxy test diagnostics
+      ansible.builtin.debug:
+        msg:
+          - "Status: {{ proxy_test.status | default('MISSING') }}"
+          - "Content: {{ proxy_test.content | default('NO CONTENT') }}"
+          - "Error: {{ proxy_test.msg | default('NO ERROR MESSAGE') }}"
+          - "URL: {{ proxy_test.url | default('UNKNOWN') }}"
+
+
+    - name: Set Jenkins version and WAR URL
+      ansible.builtin.set_fact:
+        jenkins_version: "{{ proxy_test.content | trim }}"
+        jenkins_war_url: "https://get.jenkins.io/war-stable/{{ proxy_test.content | trim }}/jenkins.war"
+
+    - name: Validate Jenkins version
+      ansible.builtin.assert:
+        that:
+          - jenkins_version is match('^[0-9]+(\\.[0-9]+)+$')
+        fail_msg: "Jenkins LTS endpoint returned an unexpected version."
+
+    - name: Set expected Jenkins LTS version
+      ansible.builtin.set_fact:
+        jenkins_version: "{{ proxy_test.content | trim }}"
+        jenkins_war_url: "https://get.jenkins.io/war-stable/{{ proxy_test.content | trim }}/jenkins.war"
+
+    - name: Download the exact Jenkins LTS WAR
+      ansible.builtin.get_url:
+        url: "{{ jenkins_war_url }}"
+        dest: "{{ jenkins_war_file }}"
+        force: true
+        owner: cctnscloud
+        mode: "0644"
+      environment:
+        http_proxy: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+        https_proxy: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+        HTTP_PROXY: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+        HTTPS_PROXY: "http://{{ jenkins_proxy_host }}:{{ jenkins_proxy_port }}"
+      register: jenkins_war_download
+
+    - name: Verify downloaded Jenkins WAR version
+      ansible.builtin.command:
+        argv:
+          - /bin/java
+          - -jar
+          - "{{ jenkins_war_file }}"
+          - --version
+      register: downloaded_jenkins_version
+      changed_when: false
+
+    - name: Assert downloaded Jenkins version matches expected version
+      ansible.builtin.assert:
+        that:
+          - downloaded_jenkins_version.stdout | trim == jenkins_version
+        fail_msg: >-
+          Downloaded Jenkins WAR version does not match the expected LTS
+          version. Expected {{ jenkins_version }},
+          got {{ downloaded_jenkins_version.stdout | default('unknown') }}.
+
+    - name: Back up existing test-controller WAR
+      ansible.builtin.copy:
+        src: "{{ jenkins_home }}/jenkins.war"
+        dest: "{{ jenkins_home }}/jenkins.war.backup"
+        remote_src: true
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_group }}"
+        mode: "0644"
+      when: jenkins_war_download.changed
+      failed_when: false
+
+    - name: Install verified Jenkins WAR into test controller home
+      ansible.builtin.copy:
+        src: "{{ jenkins_war_file }}"
+        dest: "{{ jenkins_home }}/jenkins.war"
+        remote_src: true
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_group }}"
+        mode: "0644"
+      register: installed_jenkins_war
+
+    - name: Verify installed Jenkins WAR version
+      ansible.builtin.command:
+        argv:
+          - /bin/java
+          - -jar
+          - "{{ jenkins_home }}/jenkins.war"
+          - --version
+      register: installed_jenkins_version
+      changed_when: false
+
+    - name: Assert installed Jenkins WAR version
+      ansible.builtin.assert:
+        that:
+          - installed_jenkins_version.stdout | trim == jenkins_version
+        fail_msg: "Installed Jenkins WAR version verification failed."
+
+
+
+    - name: Get latest Plugin Installation Manager release metadata
+      ansible.builtin.uri:
+        url: "{{ jenkins_plugin_manager_release_api }}"
+        method: GET
+        return_content: true
+        timeout: 30
+        use_proxy: true
+        headers:
+          Accept: application/vnd.github+json
+        status_code: 200
+      environment: "{{ proxy_environment }}"
+      register: plugin_manager_release
+      changed_when: false
+
+    - name: Select Plugin Installation Manager JAR URL
+      ansible.builtin.set_fact:
+        jenkins_plugin_manager_jar_url: "{{ (plugin_manager_release.json.assets | selectattr('name', 'search', '\\.jar$') | map(attribute='browser_download_url') | list | first) | default('') }}"
+
+    - name: Require Plugin Installation Manager JAR URL
+      ansible.builtin.assert:
+        that:
+          - jenkins_plugin_manager_jar_url | length > 0
+        fail_msg: "No JAR asset found in the latest Plugin Installation Manager release."
+
+    - name: Download Plugin Installation Manager
+      ansible.builtin.get_url:
+        url: "{{ jenkins_plugin_manager_jar_url }}"
+        dest: "{{ jenkins_plugin_manager_jar }}"
+        owner: cctnscloud
+        group: users
+        mode: "0644"
+        timeout: 120
+      environment: "{{ proxy_environment }}"
+
+    - name: Configure persisted Jenkins proxy before first startup
+      ansible.builtin.copy:
+        dest: "{{ jenkins_home }}/proxy.xml"
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_group }}"
+        mode: "0600"
+        content: |
+          <?xml version='1.1' encoding='UTF-8'?>
+          <proxy>
+            <name>{{ jenkins_proxy_host }}</name>
+            <port>{{ jenkins_proxy_port }}</port>
+            <noProxyHost>{{ jenkins_no_proxy_hosts | join('|') }}</noProxyHost>
+            <testUrl>https://updates.jenkins.io/</testUrl>
+          </proxy>
+
+    - name: Download plugins and dependencies before Jenkins startup
+      ansible.builtin.command:
+        argv:
+          - java
+          - "-Dhttp.proxyHost={{ jenkins_proxy_host }}"
+          - "-Dhttp.proxyPort={{ jenkins_proxy_port }}"
+          - "-Dhttps.proxyHost={{ jenkins_proxy_host }}"
+          - "-Dhttps.proxyPort={{ jenkins_proxy_port }}"
+          - -jar
+          - "{{ jenkins_plugin_manager_jar }}"
+          - --war
+          - "{{ jenkins_home }}/jenkins.war"
+          - --plugin-file
+          - "{{ jenkins_plugins_manifest_target }}"
+          - --plugin-download-directory
+          - "{{ jenkins_home }}/plugins"
+      environment: "{{ proxy_environment }}"
+      register: plugin_download
+      changed_when: true
+
+    - name: Set ownership of Jenkins home and plugins
+      ansible.builtin.file:
+        path: "{{ jenkins_home }}"
+        state: directory
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_group }}"
+        recurse: true
+
+    - name: Create Jenkins systemd service
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ jenkins_service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Jenkins New Test Controller
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ jenkins_user }}
+          Group={{ jenkins_group }}
+          Environment="JENKINS_HOME={{ jenkins_home }}"
+          WorkingDirectory={{ jenkins_home }}
+          ExecStart={{ java_path.stdout }} -Dhttp.proxyHost={{ jenkins_proxy_host }} -Dhttp.proxyPort={{ jenkins_proxy_port }} -Dhttps.proxyHost={{ jenkins_proxy_host }} -Dhttps.proxyPort={{ jenkins_proxy_port }} -jar {{ jenkins_home }}/jenkins.war --httpPort={{ jenkins_port }} --httpListenAddress=0.0.0.0
+          Restart=on-failure
+          RestartSec=5
+          SuccessExitStatus=143
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and start Jenkins test controller
+      ansible.builtin.systemd:
+        name: "{{ jenkins_service_name }}"
+        enabled: true
+        state: started
+
+    - name: Wait for Jenkins HTTP endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ jenkins_port }}/login"
+        method: GET
+        status_code: [200, 403]
+        return_content: false
+        timeout: 10
+      register: jenkins_http_check
+      retries: 30
+      delay: 10
+      until: jenkins_http_check.status is defined and jenkins_http_check.status in [200, 403]
+      failed_when: false
+      changed_when: false
+
+
+    - name: Check Jenkins service state
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ jenkins_service_name }}.service"]
+      register: jenkins_service_active
+      changed_when: false
+      failed_when: false
+
+    - name: Assert Jenkins service and HTTP endpoint are healthy
+      ansible.builtin.assert:
+        that:
+          - jenkins_service_active.stdout | trim == "active"
+          - jenkins_http_check.status is defined
+          - jenkins_http_check.status in [200, 403]
+        fail_msg: "Jenkins failed service/HTTP checks. Inspect journalctl for {{ jenkins_service_name }}."
+
+    - name: Read recent Jenkins service logs
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - -u
+          - "{{ jenkins_service_name }}.service"
+          - -n
+          - "250"
+          - --no-pager
+      register: jenkins_recent_logs
+      changed_when: false
+
+    - name: Display potential plugin load errors for review
+      ansible.builtin.debug:
+        msg: "{{ jenkins_recent_logs.stdout_lines | select('search', '(?i)(failed to load|failed loading|dependency.*not found|plugin.*failed|SEVERE)') | list }}"
+
+    - name: Check initial administrator password file without reading its contents
+      ansible.builtin.stat:
+        path: "{{ jenkins_home }}/secrets/initialAdminPassword"
+      register: jenkins_password_file
+      changed_when: false
+
+    - name: Read initial Jenkins admin password
+      ansible.builtin.slurp:
+        src: "{{ jenkins_home }}/secrets/initialAdminPassword"
+      register: jenkins_initial_password
+      no_log: false
+
+    - name: Display initial Jenkins admin password
+      ansible.builtin.debug:
+        msg: "Initial Jenkins admin password: {{ jenkins_initial_password.content | b64decode | trim }}"
+      no_log: false
+
+
+
+    - name: Display installation PASS
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "JENKINS TEST CONTROLLER INSTALLATION PASS"
+          - "Target: {{ ansible_host | default(inventory_hostname) }}"
+          - "Jenkins version: {{ jenkins_version }}"
+          - "Jenkins home: {{ jenkins_home }}"
+          - "Service: {{ jenkins_service_name }}.service"
+          - "Port: {{ jenkins_port }}"
+          - "URL: http://{{ ansible_host | default(inventory_hostname) }}:{{ jenkins_port }}"
+          - "HTTP status: {{ jenkins_http_check.status }}"
+          - "Initial admin password file exists: {{ jenkins_password_file.stat.exists }}"
+          - "Existing agent service was not modified by this playbook."
+          - "Existing /var/lib/jenkins was not modified by this playbook."
+          - "Initial Jenkins admin password: {{ jenkins_initial_password.content | b64decode | trim }}"            
+          - "=========================================="
+

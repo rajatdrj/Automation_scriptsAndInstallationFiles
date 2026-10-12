@@ -1,0 +1,21 @@
+---
+
+elastic_disk: /dev/sdb
+
+elastic_mount_point: /elasticsearch-data
+
+elastic_vg_name: datavg
+elastic_lv_name: datalv
+
+
+master_disk_size: 290G
+data_disk_size: 970G
+
+
+master_data_dir: /elasticsearch-data/masterdata
+data_data_dir: /elasticsearch-data/esdata
+
+
+elastic_uid: 1000
+elastic_gid: 1000
+

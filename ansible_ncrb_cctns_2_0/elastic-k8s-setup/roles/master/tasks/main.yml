@@ -1,0 +1,43 @@
+---
+
+- name: Initialize cluster
+  command: >
+    kubeadm init
+    --kubernetes-version=v1.30.14
+    --image-repository=10.212.113.11:5000
+    --pod-network-cidr=192.168.0.0/16
+
+  args:
+    creates: /etc/kubernetes/admin.conf
+
+- name: Create .kube
+  file:
+    path: /root/.kube
+    state: directory
+
+- name: Copy kubeconfig
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: yes
+
+- name: Copy Calico manifest to master node
+  copy:
+    src: /home/cctnscloud/ansible/elastic-k8s-setup/files/calico.yaml
+    dest: /home/cctnscloud/calico.yaml
+    mode: '0644'
+
+- name: Install Calico
+  command: kubectl apply -f /home/cctnscloud/calico.yaml
+
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Generate Join Command
+  command: kubeadm token create --print-join-command
+  register: join_command
+
+- name: Save Join Command
+  copy:
+    content: "{{ join_command.stdout }}"
+    dest: /tmp/join-command.sh

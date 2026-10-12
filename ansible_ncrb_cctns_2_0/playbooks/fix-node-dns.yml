@@ -1,0 +1,127 @@
+---
+- name: Fix node-level DNS safely (with backup, no fallback DNS)
+  hosts: all_workers
+  become: true
+  gather_facts: true
+
+  vars:
+    corporate_dns: "10.212.174.160"
+    search_domain: "~uat.gov.in"
+    resolved_conf: /etc/systemd/resolved.conf
+    resolved_target: /run/systemd/resolve/resolv.conf
+    backup_dir: /var/backups/dns
+
+  tasks:
+
+    # --------------------------------------------------
+    # STEP 0: Create backup directory
+    # --------------------------------------------------
+    - name: Ensure DNS backup directory exists
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # --------------------------------------------------
+    # STEP 1: Backup existing resolved.conf (if exists)
+    # --------------------------------------------------
+    - name: Backup existing systemd-resolved config
+      copy:
+        src: "{{ resolved_conf }}"
+        dest: "{{ backup_dir }}/resolved.conf.{{ ansible_date_time.iso8601 }}"
+        remote_src: true
+      when: ansible_facts['os_family'] == "RedHat"
+
+    # --------------------------------------------------
+    # STEP 2: Show current resolv.conf (for audit/debug)
+    # --------------------------------------------------
+    - name: Read current /etc/resolv.conf
+      command: cat /etc/resolv.conf
+      register: resolv_conf_content
+      changed_when: false
+
+    - name: Display current resolv.conf
+      debug:
+        msg: "{{ resolv_conf_content.stdout_lines }}"
+
+    # --------------------------------------------------
+    # STEP 3: Configure systemd-resolved (NO fallback DNS)
+    # --------------------------------------------------
+    - name: Configure systemd-resolved to use corporate DNS only
+      copy:
+        dest: "{{ resolved_conf }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Resolve]
+          DNS={{ corporate_dns }}
+          Domains={{ search_domain }}
+      notify: restart systemd-resolved
+
+    # --------------------------------------------------
+    # STEP 4: Ensure systemd-resolved is enabled & running
+    # --------------------------------------------------
+    - name: Ensure systemd-resolved is enabled and running
+      service:
+        name: systemd-resolved
+        state: started
+        enabled: true
+
+    # --------------------------------------------------
+    # STEP 5: Ensure /etc/resolv.conf symlink is correct
+    # --------------------------------------------------
+    - name: Check /etc/resolv.conf symlink
+      stat:
+        path: /etc/resolv.conf
+      register: resolv_stat
+
+    - name: Fix /etc/resolv.conf symlink if required
+      file:
+        src: "{{ resolved_target }}"
+        dest: /etc/resolv.conf
+        state: link
+        force: true
+      when: resolv_stat.stat.islnk is not defined
+            or resolv_stat.stat.lnk_source != resolved_target
+
+    # --------------------------------------------------
+    # STEP 6: Restart container runtime & kubelet
+    # --------------------------------------------------
+    - name: Restart containerd if present
+      service:
+        name: containerd
+        state: restarted
+      when: "'containerd' in ansible_facts.services"
+
+    - name: Restart docker if present
+      service:
+        name: docker
+        state: restarted
+      when: "'docker' in ansible_facts.services"
+
+    - name: Restart kubelet
+      service:
+        name: kubelet
+        state: restarted
+
+    # --------------------------------------------------
+    # STEP 7: Verification
+    # --------------------------------------------------
+    - name: Verify DNS resolution for Nexus registry
+      command: nslookup cctns.registry.uat.gov.in
+      register: dns_test
+      changed_when: false
+      failed_when: dns_test.rc != 0
+
+    - name: Show DNS verification output
+      debug:
+        msg: "{{ dns_test.stdout_lines }}"
+
+  handlers:
+    - name: restart systemd-resolved
+      service:
+        name: systemd-resolved
+        state: restarted

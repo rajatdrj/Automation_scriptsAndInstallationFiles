@@ -1,0 +1,45 @@
+---
+- name: Fix DNS resolution on Ubuntu using systemd-resolved (primary DNS on top)
+  hosts: all
+  become: true
+
+  vars:
+    primary_dns: "10.212.174.160"
+    search_domain: "uat.gov.in"
+
+  tasks:
+    - name: Ensure systemd-resolved is running
+      systemd:
+        name: systemd-resolved
+        state: started
+        enabled: true
+
+    - name: Configure primary DNS in systemd-resolved
+      copy:
+        dest: /etc/systemd/resolved.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Resolve]
+          DNS={{ primary_dns }}
+          Domains={{ search_domain }}
+          DNSStubListener=yes
+      notify: restart systemd-resolved
+
+    - name: Ensure resolv.conf uses systemd-resolved stub
+      file:
+        path: /etc/resolv.conf
+        src: /run/systemd/resolve/stub-resolv.conf
+        state: link
+        force: yes
+
+    - name: Flush DNS cache
+      command: resolvectl flush-caches
+      changed_when: false
+
+  handlers:
+    - name: restart systemd-resolved
+      systemd:
+        name: systemd-resolved
+        state: restarted

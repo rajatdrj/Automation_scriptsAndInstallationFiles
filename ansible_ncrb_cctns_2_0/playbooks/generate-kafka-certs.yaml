@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Run on the CA VM. Creates ONE keystore + ONE truststore shared by all 3 Kafka nodes.
+#   export STOREPASS='your-strong-password'
+#   ./generate-certs.sh
+set -euo pipefail
+: "${STOREPASS:?export STOREPASS first}"
+
+# SANs: every node FQDN and IP must be listed (hostname verification is ON)
+DNS_NAMES=(kafka1.uat.in kafka2.uat.in kafka3.uat.in)
+IPS=(10.10.10.11 10.10.10.12 10.10.10.13)
+
+# 1. CA (skipped if you already have ca.key / ca.crt - then reuse your own CA)
+if [[ ! -f ca.key ]]; then
+  openssl genrsa -out ca.key 4096
+  openssl req -x509 -new -key ca.key -sha256 -days 3650 -subj "/CN=UAT-Kafka-CA" -out ca.crt
+fi
+
+# 2. OpenSSL config with SANs, usable as server AND client cert
+{
+  echo "[req]"; echo "distinguished_name=dn"; echo "req_extensions=v3_req"; echo "prompt=no"
+  echo "[dn]"; echo "CN=kafka.uat.in"
+  echo "[v3_req]"
+  echo "subjectAltName=@alt"
+  echo "keyUsage=digitalSignature,keyEncipherment"
+  echo "extendedKeyUsage=serverAuth,clientAuth"
+  echo "[alt]"
+  i=1; for d in "${DNS_NAMES[@]}"; do echo "DNS.$i=$d"; i=$((i+1)); done
+  i=1; for ip in "${IPS[@]}"; do echo "IP.$i=$ip"; i=$((i+1)); done
+} > kafka.cnf
+
+# 3. Key, CSR, sign with CA
+openssl genrsa -out kafka.key 2048
+openssl req -new -key kafka.key -config kafka.cnf -out kafka.csr
+openssl x509 -req -in kafka.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -days 825 -sha256 -extensions v3_req -extfile kafka.cnf -out kafka.crt
+
+# 4. Keystore (key + cert + CA chain)
+openssl pkcs12 -export -in kafka.crt -inkey kafka.key -certfile ca.crt \
+  -name kafka -out kafka.p12 -passout pass:"$STOREPASS"
+rm -f kafka.keystore.jks
+keytool -importkeystore -srckeystore kafka.p12 -srcstoretype PKCS12 -srcstorepass "$STOREPASS" \
+  -destkeystore kafka.keystore.jks -deststoretype JKS -deststorepass "$STOREPASS" -destkeypass "$STOREPASS" -noprompt
+
+# 5. Truststore (CA only)
+rm -f kafka.truststore.jks
+keytool -importcert -alias uat-kafka-ca -file ca.crt \
+  -keystore kafka.truststore.jks -storepass "$STOREPASS" -noprompt
+
+echo "Done. Copy kafka.keystore.jks and kafka.truststore.jks into files/ssl/ on the Ansible control node."
+echo "Set kafka_ssl_keystore_password, kafka_ssl_key_password and kafka_ssl_truststore_password to the same STOREPASS."

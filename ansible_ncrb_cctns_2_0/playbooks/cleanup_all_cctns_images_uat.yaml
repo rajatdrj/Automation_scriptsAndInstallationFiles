@@ -1,0 +1,50 @@
+# cleanup-all-cctns-images.yml
+---
+- name: Remove ALL CCTNS images from K8s worker nodes (containerd)
+  hosts: assam_workers
+  become: true
+  gather_facts: false
+  serial: 5
+
+  vars:
+    image_prefix: "cctns.registry.uat.gov.in:5043/cctns-"
+    crictl_bin: "/usr/bin/crictl"
+
+  tasks:
+
+    - name: Verify crictl exists
+      ansible.builtin.stat:
+        path: "{{ crictl_bin }}"
+      register: crictl_stat
+
+    - name: Fail fast if crictl is missing
+      ansible.builtin.fail:
+        msg: "crictl not found at {{ crictl_bin }} on {{ inventory_hostname }}"
+      when: not crictl_stat.stat.exists
+
+    - name: List all images (JSON)
+      ansible.builtin.command: "{{ crictl_bin }} images -o json"
+      register: crictl_images
+      changed_when: false
+
+    - name: Select every image tag matching the prefix
+      ansible.builtin.set_fact:
+        matching_images: >-
+          {{
+            (crictl_images.stdout | from_json).images
+            | map(attribute='repoTags') | flatten
+            | select('match', '^' ~ (image_prefix | regex_escape) ~ '.*')
+            | list | unique
+          }}
+
+    - name: Show plan
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} → {{ matching_images | length }} image(s) to remove"
+
+    - name: Remove every matching image
+      ansible.builtin.command: "{{ crictl_bin }} rmi {{ item }}"
+      loop: "{{ matching_images }}"
+      when: matching_images | length > 0
+      register: rmi_results
+      changed_when: rmi_results.rc == 0
+      failed_when: false

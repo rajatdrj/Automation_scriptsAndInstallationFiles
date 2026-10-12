@@ -1,0 +1,11 @@
+---
+- hosts:
+    - elastic-kubernetes-worker-nodes-esmaster
+    - elastic-kubernetes-worker-nodes-esdata
+    - elastic-kubernetes-worker-nodes-escoordinating
+
+  become: yes
+  gather_facts: yes
+
+  roles:
+    - elastic_prereq
