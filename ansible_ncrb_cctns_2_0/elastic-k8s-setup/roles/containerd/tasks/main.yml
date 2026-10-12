@@ -1,0 +1,77 @@
+---
+- name: Install yum-utils
+  dnf:
+    name: yum-utils
+    state: present
+
+- name: Add Docker CE repository
+  command: >
+    dnf config-manager --add-repo
+    https://download.docker.com/linux/centos/docker-ce.repo
+  args:
+    creates: /etc/yum.repos.d/docker-ce.repo
+
+- name: Install containerd
+  dnf:
+    name: containerd.io
+    state: present
+
+- name: Create containerd config directory
+  file:
+    path: /etc/containerd
+    state: directory
+
+- name: Generate default containerd configuration
+  shell: |
+    containerd config default > /etc/containerd/config.toml
+
+
+- name: Enable CRI plugin
+  lineinfile:
+    path: /etc/containerd/config.toml
+    regexp: '^disabled_plugins'
+    state: absent
+
+- name: Create private registry directory
+  file:
+    path: /etc/containerd/certs.d/10.212.113.11:5000
+    state: directory
+    mode: '0755'
+
+- name: Configure private registry
+  copy:
+    dest: /etc/containerd/certs.d/10.212.113.11:5000/hosts.toml
+    content: |
+      server = "http://10.212.113.11:5000"
+
+      [host."http://10.212.113.11:5000"]
+        capabilities = ["pull", "resolve"]
+        skip_verify = true
+
+
+- name: Configure containerd registry path
+  replace:
+    path: /etc/containerd/config.toml
+    regexp: "config_path = ''"
+    replace: "config_path = '/etc/containerd/certs.d'"
+
+
+- name: Configure pause sandbox image
+  replace:
+    path: /etc/containerd/config.toml
+    regexp: "sandbox = 'registry\\.k8s\\.io/pause:[^']+'"
+    replace: "sandbox = '10.212.113.11:5000/pause:3.10.2'"
+
+
+
+- name: Enable SystemdCgroup
+  replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+
+- name: Enable containerd
+  systemd:
+    name: containerd
+    enabled: yes
+    state: restarted

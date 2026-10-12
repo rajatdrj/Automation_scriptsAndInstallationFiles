@@ -1,0 +1,46 @@
+---
+# This file is included by extend_lvm_size.yaml
+# Processes a single mount point (mount_item)
+
+- name: Extract VG and LV names from device
+  set_fact:
+    vg_name: "{{ mount_item.device | regex_replace('^/dev/mapper/([^-]+)-.*', '\\1') }}"
+    lv_name: "{{ mount_item.device | regex_replace('^/dev/mapper/[^-]+-(.*)$', '\\1') }}"
+    current_size_gb: "{{ (mount_item.size_total / (1024**3)) | float }}"
+
+- name: Get VG free space
+  set_fact:
+    vg_free_gb: "{{ vg_free_map[vg_name] | default('0') }}"
+
+- name: Calculate current usage percentage
+  set_fact:
+    usage_percent: "{{ ((mount_item.size_total - mount_item.size_available) / mount_item.size_total * 100) | float }}"
+
+- name: Display extension info
+  debug:
+    msg: "Host {{ inventory_hostname }}: {{ mount_item.mount }} ({{ vg_name }}/{{ lv_name }}) size={{ (current_size_gb | float) | round(2) }}G, usage={{ (usage_percent | float) | round(2) }}%, VG free={{ vg_free_gb }}G"
+
+- name: Extend logical volume by {{ extend_size }}
+  lvol:
+    vg: "{{ vg_name }}"
+    lv: "{{ lv_name }}"
+    size: "{{ extend_size }}"
+    force: yes
+  when:
+    - (vg_free_gb | float) > min_vg_free_gb
+    - (usage_percent | float) > usage_threshold
+
+- name: Resize XFS filesystem on {{ mount_item.mount }}
+  command: xfs_growfs {{ mount_item.mount }}
+  register: grow_result
+  changed_when: "'data blocks changed' in grow_result.stdout"
+  when:
+    - (vg_free_gb | float) > min_vg_free_gb
+    - (usage_percent | float) > usage_threshold
+
+- name: Log success
+  debug:
+    msg: "Successfully extended {{ mount_item.mount }} by {{ extend_size }} on {{ inventory_hostname }}"
+  when:
+    - (vg_free_gb | float) > min_vg_free_gb
+    - (usage_percent | float) > usage_threshold

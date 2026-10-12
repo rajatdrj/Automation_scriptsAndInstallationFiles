@@ -1,0 +1,108 @@
+---
+- name: Install Docker CE on RHEL with Proxy Support
+  hosts: all_workers
+  become: yes
+  gather_facts: yes
+
+  vars:
+    proxy_http: "http://192.0.2.12:8080"
+    proxy_https: "http://192.0.2.12:8080"
+    proxy_no: "localhost,127.0.0.1,192.0.2.50,cctns.jenkins.uat.gov.in,cctns.registry.uat.gov.in,{{ ansible_host }}"
+
+    docker_users:
+      - cctnscloud
+      - jenkins
+
+    docker_packages:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+
+  tasks:
+
+  ##################################################################
+  # 1. PROXY CONFIGURATION (IDEMPOTENT)
+  ##################################################################
+
+    - name: Ensure proxy variables are present in /etc/environment
+      blockinfile:
+        path: /etc/environment
+        create: yes
+        block: |
+          export http_proxy="{{ proxy_http }}"
+          export https_proxy="{{ proxy_https }}"
+          export no_proxy="{{ proxy_no }}"
+        marker: "# {mark} ANSIBLE DOCKER PROXY"
+      notify: Reload environment
+
+  ##################################################################
+  # 2. REMOVE PODMAN & BUILDAH
+  ##################################################################
+
+    - name: Remove podman and buildah
+      dnf:
+        name:
+          - podman
+          - buildah
+        state: absent
+
+  ##################################################################
+  # 3. ADD DOCKER OFFICIAL REPOSITORY
+  ##################################################################
+
+    - name: Add Docker CE repository
+      get_url:
+        url: https://download.docker.com/linux/rhel/docker-ce.repo
+        dest: /etc/yum.repos.d/docker-ce.repo
+        mode: '0644'
+
+  ##################################################################
+  # 4. INSTALL DOCKER PACKAGES
+  ##################################################################
+
+    - name: Install Docker CE packages
+      dnf:
+        name: "{{ docker_packages }}"
+        state: present
+
+  ##################################################################
+  # 5. ENABLE & START DOCKER
+  ##################################################################
+
+    - name: Enable and start Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+  ##################################################################
+  # 6. ADD USERS TO DOCKER GROUP
+  ##################################################################
+
+    - name: Ensure docker group exists
+      group:
+        name: docker
+        state: present
+
+    - name: Add users to docker group
+      user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+      loop: "{{ docker_users }}"
+
+  ##################################################################
+  # 7. VERIFY DOCKER INSTALLATION
+  ##################################################################
+
+    - name: Verify Docker installation
+      command: docker version
+      register: docker_version
+      changed_when: false
+
+    - name: Show Docker version
+      debug:
+        var: docker_version.stdout_lines
+

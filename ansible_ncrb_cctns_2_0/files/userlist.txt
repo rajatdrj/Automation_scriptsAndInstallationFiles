@@ -1,0 +1,3 @@
+"postgres" "SCRAM-SHA-256$4096:fBR3Dqs6zHOwNwbQr04seQ==$ia0S7GJNvIrgdzRyZ3yTf1OsiPqiJH01v+xyZFXiqCs=:haJQ2BE3AleA0PrrUOqNLit3EhYu/+CNM2Eqi4n7iAY="
+"app_user" "SCRAM-SHA-256$4096:qI8Z76W86Afn9+JJqIa7Ig==$bXnzIw1jKNfv0iNKOyXwpvdY5jpFmy6Iie2uuWj20Zk=:cbDh8IxOVONrrDk6ChuwOCdsEAz8QK4mdM3KcVjFxec="
+

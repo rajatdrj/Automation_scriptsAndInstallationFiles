@@ -1,0 +1,8 @@
+---
+- name: Install ECK Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  roles:
+    - eck_operator

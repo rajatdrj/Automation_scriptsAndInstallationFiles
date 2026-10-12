@@ -1,0 +1,21 @@
+---
+- name: Copy Kubernetes templates to Jenkins home
+  hosts: all
+  become: yes
+
+  vars:
+    k8s_templates:
+      - kubernetes-template-assam.yml
+      - kubernetes-template-chandigarh.yml
+      - kubernetes-template-ladakh.yml
+      - kubernetes-template-uttarakhand.yml
+
+  tasks:
+    - name: Copy Kubernetes template files
+      copy:
+        src: "/home/cctnscloud/ansible/files/{{ item }}"
+        dest: "/var/lib/jenkins/{{ item }}"
+        owner: jenkins
+        group: root
+        mode: '0644'
+      loop: "{{ k8s_templates }}"

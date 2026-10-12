@@ -1,0 +1,34 @@
+---
+- name: Safely shrink /tmp and /var/tmp via backup/restore
+  hosts: all
+  become: yes
+  gather_facts: yes
+  vars:
+    shrink_targets:
+      - mount: /tmp
+        new_size: "5G"
+        backup_dir: "/root/backup_tmp"
+      - mount: /var/tmp
+        new_size: "4G"
+        backup_dir: "/root/backup_var_tmp"
+
+  tasks:
+    - name: Warn about destructive action
+      debug:
+        msg: |
+          WARNING: This playbook will DESTROY and recreate the following mounts:
+          {{ shrink_targets | map(attribute='mount') | list }}
+          All data will be backed up to /root/backup_* and restored.
+          Downtime is required. Ensure you have a full system backup.
+
+    - name: Confirm before proceeding
+      pause:
+        prompt: "Type 'yes' to continue or 'no' to abort"
+      register: confirm
+      failed_when: confirm.user_input != 'yes'
+
+    - name: Process each shrink target
+      include_tasks: shrink_one_mount.yaml
+      loop: "{{ shrink_targets }}"
+      loop_control:
+        loop_var: target

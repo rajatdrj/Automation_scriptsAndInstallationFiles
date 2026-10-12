@@ -1,0 +1,31 @@
+---
+- name: Wait until PostgreSQL PGDG repository is reachable
+  hosts: all
+  become: yes
+
+  vars:
+    pg_repo_url: "https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+
+    proxy_env:
+      http_proxy: "http://192.0.2.12:8080"
+      https_proxy: "http://192.0.2.12:8080"
+      no_proxy: "localhost,127.0.0.1,192.0.2.50,10.212.113.131,10.212.113.132,10.212.113.134,10.212.174.230,10.212.174.231,10.212.174.232,10.212.135.102,10.212.135.113,10.212.135.122,10.212.135.72"
+
+  tasks:
+
+    - name: Wait until PostgreSQL repo URL is reachable from host
+      uri:
+        url: "{{ pg_repo_url }}"
+        method: HEAD
+        return_content: no
+        validate_certs: no
+      register: repo_check_url
+      environment: "{{ proxy_env }}"
+      retries: 50
+      delay: 30
+      until: repo_check_url.status == 200
+      failed_when: repo_check_url.status is not defined
+
+    - name: Display success message
+      debug:
+        msg: "PostgreSQL repository is reachable from {{ inventory_hostname }}"

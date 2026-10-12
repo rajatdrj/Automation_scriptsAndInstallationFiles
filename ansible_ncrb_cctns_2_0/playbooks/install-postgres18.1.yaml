@@ -1,0 +1,86 @@
+---
+- name: Install PostgreSQL 18.1 on RHEL 9
+  hosts: all
+  become: yes
+  vars:
+    proxy_env:
+      http_proxy: "http://192.0.2.12:8080"
+      https_proxy: "http://192.0.2.12:8080"
+      no_proxy: "localhost,127.0.0.1,192.0.2.50,10.212.113.131,10.212.113.132,10.212.113.134,10.212.174.230,10.212.174.231,10.212.174.232,10.212.135.102,10.212.135.113,10.212.135.122,10.212.135.72"
+
+    pg_version: "18.1"
+    pg_major: "18"
+    pg_repo_url: "https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+    pg_data_dir: "/var/lib/pgsql/18/data"
+
+  tasks:
+
+    - name: Ensure proxy variables are present in /etc/environment
+      lineinfile:
+        path: /etc/environment
+        regexp: '^{{ item.key }}='
+        line: '{{ item.key }}="{{ item.value }}"'
+        create: yes
+      loop: "{{ proxy_env | dict2items }}"
+
+    - name: Check if PGDG repo RPM already installed
+      command: rpm -q pgdg-redhat-repo
+      register: repo_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install PGDG repository
+      dnf:
+        name: "{{ pg_repo_url }}"
+        state: present
+        disable_gpg_check: yes
+      environment: "{{ proxy_env }}"
+      when: repo_check.rc != 0
+      register: repo_install
+
+    - name: Fail if repository installation failed (no internet)
+      fail:
+        msg: "PostgreSQL repository could not be installed. Internet/proxy may not be working."
+      when:
+        - repo_check.rc != 0
+        - repo_install is failed
+
+    - name: Disable built-in PostgreSQL module
+      command: dnf -qy module disable postgresql
+      register: module_disable
+      failed_when: false
+      changed_when: "'Nothing to do' not in module_disable.stdout"
+
+
+
+    - name: Install PostgreSQL 18.1 packages
+      dnf:
+        name:
+          - "postgresql{{ pg_major }}-server-{{ pg_version }}"
+          - "postgresql{{ pg_major }}-{{ pg_version }}"
+        state: present
+      environment: "{{ proxy_env }}"
+
+    - name: Check if PostgreSQL database is initialized
+      stat:
+        path: "{{ pg_data_dir }}/PG_VERSION"
+      register: pg_initialized
+
+    - name: Initialize PostgreSQL 18 database
+      command: "/usr/pgsql-{{ pg_major }}/bin/postgresql-{{ pg_major }}-setup initdb"
+      when: not pg_initialized.stat.exists
+
+    - name: Enable and start PostgreSQL 18 service
+      systemd:
+        name: "postgresql-{{ pg_major }}"
+        enabled: yes
+        state: started
+
+    - name: Check PostgreSQL service status
+      command: systemctl is-active postgresql-{{ pg_major }}
+      register: pg_status
+      changed_when: false
+
+    - name: Display PostgreSQL service status
+      debug:
+        msg: "PostgreSQL service status: {{ pg_status.stdout }}"

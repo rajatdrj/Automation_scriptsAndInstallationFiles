@@ -1,0 +1,21 @@
+---
+- hosts: all_elastic_k8s_nodes
+  become: yes
+
+  roles:
+    - common
+    - containerd
+    - kubernetes
+
+- hosts: elastic-kubernetes-master-nodes
+  become: yes
+
+  roles:
+    - master
+
+
+- hosts: elastic-kubernetes-worker-nodes
+  become: yes
+
+  roles:
+    - worker

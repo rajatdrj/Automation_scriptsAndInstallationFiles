@@ -1,0 +1,12 @@
+---
+
+- name: Generate Kubernetes join command
+  command: kubeadm token create --print-join-command
+  delegate_to: "{{ groups['elastic-kubernetes-master-nodes'][0] }}"
+  register: join_command
+  changed_when: false
+
+- name: Join Cluster
+  shell: "{{ join_command.stdout }}"
+  args:
+    creates: /etc/kubernetes/kubelet.conf

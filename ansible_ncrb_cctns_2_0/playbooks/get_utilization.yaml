@@ -1,0 +1,257 @@
+---
+- name: Infrastructure Health Report
+  hosts: all
+  become: yes
+  gather_facts: yes
+  ignore_unreachable: yes
+  
+  vars:
+    services_to_check:
+      - docker
+      - crio
+      - kubelet
+      - kube-apiserver
+      - kafka
+      - redis
+      - redis-server
+      - elasticsearch
+      - apisix
+      - nginx
+      - jenkins
+      - jenkins-agent
+      - zookeeper
+      - etcd
+    
+    failed_hosts: []
+
+  tasks:
+    
+    - name: Get OS Information
+      setup:
+        filter:
+          - ansible_system
+          - ansible_distribution
+          - ansible_distribution_version
+          - ansible_os_family
+
+    - name: Determine OS Type and Version
+      set_fact:
+        os_type: "{{ ansible_system }}"
+        os_distribution: "{{ ansible_distribution | default('Unknown') }}"
+        os_version: "{{ ansible_distribution_version | default('Unknown') }}"
+      when: ansible_system is defined
+
+    - name: Get CPU Utilization
+      shell: |
+        top -bn1 | grep "Cpu(s)" | awk '{print 100-$8}'
+      register: cpu
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Alternative CPU check for non-Linux
+      shell: |
+        if [[ "$(uname)" == "Darwin" ]]; then
+          top -l 1 | grep "CPU usage" | awk '{print 100-$7}' | cut -d'%' -f1
+        else
+          top -bn1 | grep "Cpu(s)" | awk '{print 100-$8}'
+        fi
+      register: cpu_alt
+      changed_when: false
+      ignore_errors: yes
+      when: cpu is failed
+
+    - name: Get Memory Utilization
+      shell: |
+        free | awk '/Mem:/ {printf("%.2f",$3/$2*100)}'
+      register: memory
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Alternative memory check for non-Linux
+      shell: |
+        if [[ "$(uname)" == "Darwin" ]]; then
+          vm_stat | perl -ne '/page size of (\d+)/ and $size=$1; /Pages free:\s+(\d+)/ and $free=$1; /Pages active:\s+(\d+)/ and $active=$1; /Pages inactive:\s+(\d+)/ and $inactive=$1; /Pages speculative:\s+(\d+)/ and $speculative=$1; /Pages wired down:\s+(\d+)/ and $wired=$1; $total=$free+$active+$inactive+$speculative+$wired; $used=$active+$inactive+$wired; printf("%.2f", $used/$total*100);'
+        else
+          free | awk '/Mem:/ {printf("%.2f",$3/$2*100)}'
+        fi
+      register: memory_alt
+      changed_when: false
+      ignore_errors: yes
+      when: memory is failed
+
+    - name: Get Uptime
+      command: uptime -p
+      register: uptime
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Alternative uptime for Windows
+      shell: |
+        if [[ "$(uname)" == "MINGW"* ]] || [[ "$(uname)" == "CYGWIN"* ]]; then
+          net statistics workstation | grep "Statistics since" | awk '{print $3,$4,$5,$6,$7,$8}'
+        else
+          uptime -p
+        fi
+      register: uptime_alt
+      changed_when: false
+      ignore_errors: yes
+      when: uptime is failed
+
+    - name: Check Services
+      shell: |
+        systemctl is-active {{ item }} 2>/dev/null || echo "Not Installed"
+      loop: "{{ services_to_check }}"
+      register: service_results
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Build Service Dictionary
+      set_fact:
+        service_dict: "{{ service_dict | default({}) | combine({item.item: item.stdout}) }}"
+      loop: "{{ service_results.results }}"
+      when: item.stdout is defined
+
+    - name: Create CSV Header
+      delegate_to: localhost
+      run_once: true
+      copy:
+        dest: /tmp/infrastructure_report.csv
+        content: |
+          Status,Hostname,IP,OS Type,OS Distribution,OS Version,CPU%,Memory%,Uptime,Docker,CRIO,Kubelet,Kube-APIServer,Kafka,Redis,ElasticSearch,APISIX,Nginx,Jenkins,JenkinsAgent,Zookeeper,ETCD
+
+    - name: Append Host Information
+      delegate_to: localhost
+      lineinfile:
+        path: /tmp/infrastructure_report.csv
+        insertafter: EOF
+        line: >-
+          Success,
+          {{ ansible_hostname }},
+          {{ ansible_default_ipv4.address | default('N/A') }},
+          {{ os_type | default('Unknown') }},
+          {{ os_distribution | default('Unknown') }},
+          {{ os_version | default('Unknown') }},
+          {{ cpu.stdout | default(cpu_alt.stdout | default('Failed')) }},
+          {{ memory.stdout | default(memory_alt.stdout | default('Failed')) }},
+          "{{ uptime.stdout | default(uptime_alt.stdout | default('Failed')) }}",
+          {{ service_dict.docker | default('N/A') }},
+          {{ service_dict.crio | default('N/A') }},
+          {{ service_dict.kubelet | default('N/A') }},
+          {{ service_dict['kube-apiserver'] | default('N/A') }},
+          {{ service_dict.kafka | default('N/A') }},
+          {{ service_dict['redis-server'] | default(service_dict.redis | default('N/A')) }},
+          {{ service_dict.elasticsearch | default('N/A') }},
+          {{ service_dict.apisix | default('N/A') }},
+          {{ service_dict.nginx | default('N/A') }},
+          {{ service_dict.jenkins | default('N/A') }},
+          {{ service_dict['jenkins-agent'] | default('N/A') }},
+          {{ service_dict.zookeeper | default('N/A') }},
+          {{ service_dict.etcd | default('N/A') }}
+      when: not (ansible_default_ipv4.address is undefined)
+
+    - name: Record Failed Hosts
+      set_fact:
+        failed_hosts: "{{ failed_hosts + [{'hostname': ansible_hostname, 'ip': ansible_default_ipv4.address | default('Unknown'), 'os': os_type | default('Unknown'), 'distro': os_distribution | default('Unknown'), 'version': os_version | default('Unknown')}] }}"
+      when: 
+        - cpu is failed or memory is failed or uptime is failed
+        - ansible_default_ipv4.address is defined
+
+    - name: Handle Unreachable Hosts
+      set_fact:
+        failed_hosts: "{{ failed_hosts + [{'hostname': inventory_hostname, 'ip': 'Unreachable', 'os': 'Unknown', 'distro': 'Unknown', 'version': 'Unknown'}] }}"
+      delegate_to: localhost
+      run_once: true
+      when: 
+        - hostvars[inventory_hostname] is not defined or hostvars[inventory_hostname].ansible_default_ipv4 is not defined
+
+  post_tasks:
+    
+    - name: Create Final Summary Report
+      delegate_to: localhost
+      run_once: true
+      copy:
+        dest: /tmp/final_summary_report.txt
+        content: |
+          ==================================================
+          INFRASTRUCTURE HEALTH CHECK SUMMARY REPORT
+          ==================================================
+          Generated: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          
+          TOTAL HOSTS PROCESSED: {{ ansible_play_hosts_all | length }}
+          SUCCESSFUL HOSTS: {{ ansible_play_hosts_all | length - (failed_hosts | length) }}
+          FAILED HOSTS: {{ failed_hosts | length }}
+          
+          ==================================================
+          FAILED HOSTS DETAILS
+          ==================================================
+          {% if failed_hosts | length > 0 %}
+          {% for host in failed_hosts %}
+          Hostname: {{ host.hostname }}
+          IP Address: {{ host.ip }}
+          OS Type: {{ host.os }}
+          Distribution: {{ host.distro }}
+          Version: {{ host.version }}
+          Reason: Check CPU/Memory/Uptime collection failures
+          ------------------------------------------------
+          {% endfor %}
+          {% else %}
+          No hosts failed during the health check!
+          {% endif %}
+          
+          ==================================================
+          OS DISTRIBUTION SUMMARY
+          ==================================================
+          {% set os_stats = {} %}
+          {% for host in ansible_play_hosts_all %}
+            {% set current_os = hostvars[host].os_distribution | default('Unknown') %}
+            {% set current_version = hostvars[host].os_version | default('Unknown') %}
+            {% set os_key = current_os + ' ' + current_version %}
+            {% if os_key not in os_stats %}
+              {% set _ = os_stats.update({os_key: 1}) %}
+            {% else %}
+              {% set _ = os_stats.update({os_key: os_stats[os_key] + 1}) %}
+            {% endif %}
+          {% endfor %}
+          {% for os, count in os_stats.items() %}
+          - {{ os }}: {{ count }} host(s)
+          {% endfor %}
+          
+          ==================================================
+          CSV REPORT LOCATION
+          ==================================================
+          Detailed CSV report: /tmp/infrastructure_report.csv
+          
+          ==================================================
+          END OF REPORT
+          ==================================================
+
+    - name: Display Final Summary
+      delegate_to: localhost
+      run_once: true
+      debug:
+        msg:
+          - "Playbook execution completed!"
+          - "Total hosts: {{ ansible_play_hosts_all | length }}"
+          - "Successful: {{ ansible_play_hosts_all | length - (failed_hosts | length) }}"
+          - "Failed: {{ failed_hosts | length }}"
+          - "Detailed CSV report: /tmp/infrastructure_report.csv"
+          - "Final summary report: /tmp/final_summary_report.txt"
+
+    - name: Print Failed Hosts List
+      delegate_to: localhost
+      run_once: true
+      debug:
+        msg: "FAILED HOSTS: {{ failed_hosts }}"
+      when: failed_hosts | length > 0
+
+    - name: Display Summary Report Content
+      delegate_to: localhost
+      run_once: true
+      command: cat /tmp/final_summary_report.txt
+      register: report_content
+      
+    - name: Show Report
+      delegate_to: localhost
+      run_once: true
+      debug:
+        msg: "{{ report_content.stdout_lines }}"

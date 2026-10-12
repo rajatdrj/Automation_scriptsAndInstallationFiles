@@ -1,0 +1,65 @@
+---
+- name: Daily System and Docker Cleanup
+  hosts: cleanup_nodes
+  become: yes
+  gather_facts: false
+
+  tasks:
+    - name: 1. Remove audit logs older than 4 days
+      ansible.builtin.find:
+        paths: /var/log/audit
+        patterns: "audit.log.*"
+        age: "4d"
+        file_type: file
+      register: audit_logs
+
+    - name: Delete matched audit log rotation files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ audit_logs.files }}"
+
+    - name: 2. Vacuum journald logs older than 4 days
+      ansible.builtin.command:
+        cmd: journalctl --vacuum-time=4d
+      changed_when: false
+
+    - name: Truncate active system logs
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ item }}"
+        force: false
+      loop:
+        - /var/log/messages
+        - /var/log/secure
+        - /var/log/maillog
+        - /var/log/cron
+        - /var/log/boot.log
+
+    - name: Remove compressed rotated log archives (> 4 days)
+      ansible.builtin.shell:
+        cmd: find /var/log -type f \( -name "*.gz" -o -name "*.xz" -o -name "*-*" \) -mtime +4 -exec rm -f {} +
+      changed_when: false
+
+    - name: 3. Prune Docker build cache
+      ansible.builtin.command:
+        cmd: docker builder prune -f --all
+      failed_when: false
+      changed_when: false
+
+        #    - name: Prune Docker containers and images
+        #      ansible.builtin.command:
+        #        cmd: docker system prune -f
+        #      failed_when: false
+        #      changed_when: false
+
+        #    - name: 4. Clean DNF/YUM package manager cache
+        #      ansible.builtin.command:
+        #        cmd: dnf clean all -y
+        #      failed_when: false
+        #      changed_when: false
+
+        #    - name: 5. Clean temporary files
+        #      ansible.builtin.shell:
+        #        cmd: rm -rf /tmp/* /var/tmp/* 2>/dev/null || true
+        #      changed_when: false

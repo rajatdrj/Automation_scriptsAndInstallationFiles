@@ -1,0 +1,84 @@
+---
+- name: Extend /var to 10 GB if usage > 70% and VG has space
+  hosts: all
+  gather_facts: yes
+  become: yes
+  vars:
+    target_size_gb: 10
+    usage_threshold: 70
+    mount_point: /var
+
+  tasks:
+    # ---- Get mount info ----
+    - name: Get mount info for /var
+      set_fact:
+        mount_info: "{{ ansible_mounts | selectattr('mount', 'equalto', mount_point) | first }}"
+      when: ansible_mounts | selectattr('mount', 'equalto', mount_point) | list | length > 0
+
+    - name: Fail if /var is not a separate mount
+      fail:
+        msg: "/var is not a separate filesystem"
+      when: mount_info is not defined
+
+    # ---- Compute current size and usage ----
+    - name: Calculate current size and usage
+      set_fact:
+        current_size_gb: "{{ (mount_info.size_total / (1024**3)) | float }}"
+        usage_percent: "{{ ((mount_info.size_total - mount_info.size_available) / mount_info.size_total * 100) | float }}"
+
+    # ---- Skip hosts that don't meet the criteria ----
+    - name: Skip hosts with usage <= {{ usage_threshold }}% or size >= {{ target_size_gb }}G
+      debug:
+        msg: "Skipping {{ inventory_hostname }}: usage={{ usage_percent }}%, size={{ current_size_gb }}G"
+      when: not (usage_percent | float > usage_threshold and current_size_gb | float < target_size_gb)
+
+    # ---- Extension block (only for eligible hosts) ----
+    - block:
+        - name: Extract VG and LV names from device
+          set_fact:
+            device: "{{ mount_info.device }}"
+            vg_name: "{{ mount_info.device | regex_replace('^/dev/mapper/([^-]+)-.*', '\\1') }}"
+            lv_name: "{{ mount_info.device | regex_replace('^/dev/mapper/[^-]+-(.*)$', '\\1') }}"
+
+        - name: Display VG/LV info
+          debug:
+            msg: "Device {{ device }} → VG: {{ vg_name }}, LV: {{ lv_name }}"
+
+        - name: Get VG free space in GB
+          shell: "vgs --units g --noheadings --options vg_free --nosuffix {{ vg_name }} | tr -d ' '"
+          register: vg_free_output
+          changed_when: false
+
+        - name: Parse VG free space as float
+          set_fact:
+            vg_free_gb: "{{ vg_free_output.stdout | float }}"
+
+        - name: Check if VG has enough free space
+          fail:
+            msg: "VG {{ vg_name }} has only {{ vg_free_gb }}G free, need {{ (target_size_gb - (current_size_gb | float)) | float }}G. Skipping extension."
+          when: (vg_free_gb | float) < ((target_size_gb - (current_size_gb | float)) | float)
+          ignore_errors: yes
+          register: vg_check
+
+        - name: Extend logical volume to {{ target_size_gb }}G
+          lvol:
+            vg: "{{ vg_name }}"
+            lv: "{{ lv_name }}"
+            size: "{{ target_size_gb }}G"
+            force: yes
+          when: vg_check is not failed
+
+        - name: Resize XFS filesystem on {{ mount_point }}
+          command: xfs_growfs {{ mount_point }}
+          register: growfs_result
+          changed_when: "'data blocks changed' in growfs_result.stdout"
+          when: vg_check is not failed
+
+        - name: Display success message
+          debug:
+            msg: "Successfully extended {{ mount_point }} to {{ target_size_gb }}G on {{ inventory_hostname }}"
+          when: vg_check is not failed
+
+      when:
+        - usage_percent | float > usage_threshold
+        - current_size_gb | float < target_size_gb

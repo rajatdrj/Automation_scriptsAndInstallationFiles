@@ -1,0 +1,14 @@
+---
+
+- name: Prepare Elasticsearch storage
+  include_tasks: storage.yml
+
+
+- name: Configure kernel parameters
+  include_tasks: kernel.yml
+
+
+- name: Configure Kubernetes labels
+  include_tasks: labels.yml
+  tags:
+    - labels

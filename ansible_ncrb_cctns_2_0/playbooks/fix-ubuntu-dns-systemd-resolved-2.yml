@@ -1,0 +1,55 @@
+---
+- name: Fix DNS resolution on Ubuntu using systemd-resolved (primary DNS only)
+  hosts: all_frontend
+  become: true
+  vars:
+    primary_dns: "10.212.174.160"
+    search_domain: "uat.gov.in"
+
+  tasks:
+
+    - name: Ensure systemd-resolved service is running
+      systemd:
+        name: systemd-resolved
+        state: started
+        enabled: yes
+
+    - name: Configure primary DNS in systemd-resolved
+      command: resolvectl dns eth0 {{ primary_dns }}
+      register: dns_config
+      changed_when: dns_config.rc == 0
+
+    - name: Configure search domain in systemd-resolved
+      command: resolvectl domain eth0 {{ search_domain }}
+      register: domain_config
+      changed_when: domain_config.rc == 0
+
+    - name: Ensure /etc/resolv.conf points to systemd-resolved
+      file:
+        path: /etc/resolv.conf
+        state: link
+        src: /run/systemd/resolve/resolv.conf
+
+    - name: Flush DNS cache
+      command: resolvectl flush-caches
+
+    - name: Restart systemd-resolved to apply changes
+      systemd:
+        name: systemd-resolved
+        state: restarted
+        daemon_reload: yes
+
+    - name: Show DNS status
+      command: resolvectl status
+      register: dns_status
+      changed_when: false
+
+    - debug:
+        msg: "{{ dns_status.stdout }}"
+
+    - name: Test DNS resolution for registry
+      command: getent hosts cctns.registry.uat.gov.in
+      register: dns_test
+      retries: 3
+      delay: 3
+      until: dns_test.rc == 0

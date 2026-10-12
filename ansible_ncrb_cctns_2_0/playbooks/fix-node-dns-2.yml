@@ -1,0 +1,109 @@
+---
+- name: Configure node DNS without stopping DHCP DNS
+  hosts: all_workers_jenkins
+  become: true
+  gather_facts: true
+  serial: 5
+
+  vars:
+    corporate_dns: "10.212.174.160"
+    fallback_dns: "8.8.8.8"
+    search_domain: "~uat.gov.in"
+    resolved_conf: /etc/systemd/resolved.conf
+    backup_dir: /var/backups/dns
+
+  tasks:
+
+    - name: Ensure backup directory exists
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Backup existing DNS file (RHEL vs Debian/Ubuntu)
+      copy:
+        src: "{{ backup_file }}"
+        dest: "{{ backup_dir }}/{{ backup_file_name }}.{{ ansible_date_time.iso8601 }}"
+        remote_src: true
+      vars:
+        backup_file: "{{ '/etc/resolv.conf' if ansible_facts['os_family'] == 'RedHat' else resolved_conf }}"
+        backup_file_name: "{{ 'resolv.conf' if ansible_facts['os_family'] == 'RedHat' else 'resolved.conf' }}"
+      ignore_errors: yes
+
+    - name: Configure DNS on RHEL 9 using NetworkManager
+      block:
+        - name: Get primary active connection name
+          command: nmcli -t -f NAME c show --active
+          register: nm_conn
+          changed_when: false
+
+        - name: Configure corporate + fallback DNS
+          command: >
+            nmcli connection modify "{{ nm_conn.stdout_lines[0] }}"
+            ipv4.dns "{{ corporate_dns }},{{ fallback_dns }}"
+            ipv4.ignore-auto-dns yes
+
+        - name: Reload NetworkManager connection
+          command: nmcli connection up "{{ nm_conn.stdout_lines[0] }}"
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Configure DNS on Debian/Ubuntu using systemd-resolved
+      copy:
+        dest: "{{ resolved_conf }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Resolve]
+          DNS={{ corporate_dns }}
+          Domains={{ search_domain }}
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Restart NetworkManager (RHEL)
+      service:
+        name: NetworkManager
+        state: restarted
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Restart systemd-resolved (Debian/Ubuntu)
+      service:
+        name: systemd-resolved
+        state: restarted
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Verify corporate DNS is in resolv.conf (RHEL) or resolvectl (Debian)
+      block:
+        - name: Check DNS on RHEL 9
+          command: cat /etc/resolv.conf
+          register: rhel_dns
+          changed_when: false
+          when: ansible_facts['os_family'] == "RedHat"
+
+        - name: Check DNS on Debian/Ubuntu
+          command: resolvectl status
+          register: debian_dns
+          changed_when: false
+          ignore_errors: yes
+          when: ansible_facts['os_family'] == "Debian"
+
+        - name: Assert corporate DNS is active on RHEL
+          assert:
+            that:
+              - corporate_dns in rhel_dns.stdout
+            fail_msg: "Corporate DNS not active in /etc/resolv.conf"
+            success_msg: "Corporate DNS active in /etc/resolv.conf"
+          when: ansible_facts['os_family'] == "RedHat"
+
+        - name: Assert corporate DNS is active on Debian
+          assert:
+            that:
+              - corporate_dns in debian_dns.stdout
+            fail_msg: "Corporate DNS not active in resolvectl"
+            success_msg: "Corporate DNS active in resolvectl"
+          when: ansible_facts['os_family'] == "Debian"
+
+    - name: Test registry DNS resolution
+      command: nslookup cctns.registry.uat.gov.in
+      register: nslookup_test
+      changed_when: false
+      failed_when: nslookup_test.rc != 0

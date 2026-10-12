@@ -1,0 +1,27 @@
+---
+- ansible.builtin.import_playbook: install-jenkins.yml
+
+- ansible.builtin.import_playbook: migrate-jenkins-security.yml
+
+- name: Restart Jenkins after migration
+  hosts: jenkins_target
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Restart Jenkins service
+      ansible.builtin.systemd:
+        name: jenkins.service
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Check Jenkins service state
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - jenkins.service
+      register: jenkins_service_active
+      changed_when: false
+      failed_when: jenkins_service_active.stdout | trim != "active"

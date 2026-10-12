@@ -1,0 +1,196 @@
+---
+- name: Install Docker, Maven, Git and Trust Nexus Registry on RHEL
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    # Proxy configuration
+    proxy_http: "http://192.0.2.12:8080"
+    proxy_https: "http://192.0.2.12:8080"
+    proxy_no: "localhost,127.0.0.1,192.0.2.50,cctns.jenkins.uat.gov.in,cctns.registry.uat.gov.in,cctns.jenkins.ncrb.in,{{ ansible_host }}"
+
+    # Users to add to Docker group
+    docker_users:
+      - cctnscloud
+      - jenkins
+
+    # Docker packages
+    docker_packages:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+
+    # Maven configuration
+    maven_src: /home/cctnscloud/ansible/files/apache-maven-3.9.9
+    maven_dest: /opt/apache-maven-3.9.9
+
+    # CA cert for Docker
+    ca_cert_src: /home/cctnscloud/ansible/files/mkcert-rootCA.pem
+    ca_cert_dest: /etc/pki/ca-trust/source/anchors/mkcert-rootCA.pem
+
+    # Nexus registries
+    nexus_registries:
+      - cctns.registry.uat.gov.in:5042
+      - cctns.registry.uat.gov.in:5043
+      - cctns.registry.uat.gov.in:5044
+      - cctns.registry.uat.gov.in:5055
+      - cctns.registry.uat.gov.in:5056
+
+  tasks:
+
+  ##################################################################
+  # 1. Proxy Configuration (Idempotent)
+  ##################################################################
+
+    - name: Ensure proxy variables are present in /etc/environment
+      blockinfile:
+        path: /etc/environment
+        create: yes
+        block: |
+          export http_proxy="{{ proxy_http }}"
+          export https_proxy="{{ proxy_https }}"
+          export no_proxy="{{ proxy_no }}"
+        marker: "# {mark} ANSIBLE DOCKER PROXY"
+
+  ##################################################################
+  # 2. Remove Podman & Buildah
+  ##################################################################
+
+    - name: Remove podman and buildah
+      dnf:
+        name:
+          - podman
+          - buildah
+        state: absent
+
+  ##################################################################
+  # 3. Add Docker Repository
+  ##################################################################
+
+    - name: Add Docker CE repository
+      get_url:
+        url: https://download.docker.com/linux/rhel/docker-ce.repo
+        dest: /etc/yum.repos.d/docker-ce.repo
+        mode: '0644'
+
+  ##################################################################
+  # 4. Install Docker Packages
+  ##################################################################
+
+    - name: Install Docker CE packages
+      dnf:
+        name: "{{ docker_packages }}"
+        state: present
+
+  ##################################################################
+  # 5. Enable & Start Docker Service
+  ##################################################################
+
+    - name: Enable and start Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+  ##################################################################
+  # 6. Add Users to Docker Group
+  ##################################################################
+
+    - name: Ensure docker group exists
+      group:
+        name: docker
+        state: present
+
+    - name: Add users to docker group
+      user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+      loop: "{{ docker_users }}"
+
+  ##################################################################
+  # 7. Install Git
+  ##################################################################
+
+    - name: Install Git
+      dnf:
+        name: git
+        state: present
+
+  ##################################################################
+  # 8. Install NodeJS (Idempotent)
+  ##################################################################
+    - name: Ensure NodeSource repository file exists
+      copy:
+        dest: /etc/yum.repos.d/nodesource-nodejs.repo
+        content: |
+          [nodesource-nodejs]
+          name=Node.js Packages for Linux RPM based distros - x86_64
+          baseurl=https://rpm.nodesource.com/pub_22.x/nodistro/nodejs/x86_64
+          priority=9
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://rpm.nodesource.com/gpgkey/ns-operations-public.key
+          module_hotfixes=1
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Import NodeSource GPG key
+      rpm_key:
+        state: present
+        key: https://rpm.nodesource.com/gpgkey/ns-operations-public.key
+
+    - name: Install specific Node.js version 22.21.1
+      yum:
+        name: nodejs-2:22.21.1-1nodesource
+        state: present
+        enablerepo: nodesource-nodejs
+        disable_gpg_check: no
+
+
+  ##################################################################
+  # 9. Trust CA Certificate for Docker
+  ##################################################################
+
+    - name: Copy CA cert for Docker registry
+      copy:
+        src: "{{ ca_cert_src }}"
+        dest: "{{ ca_cert_dest }}"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Update CA trust
+      command: update-ca-trust
+      changed_when: false
+
+  ##################################################################
+  # 10. Verify Docker Connectivity to Nexus Registries
+  ##################################################################
+
+    - name: Test Docker connectivity to Nexus registries
+      shell: "docker login {{ item }} --username dummy --password dummy || true"
+      loop: "{{ nexus_registries }}"
+      register: docker_login_test
+      changed_when: false
+
+    - name: Show Docker login test results
+      debug:
+        var: docker_login_test.results
+
+  ##################################################################
+  # 11. Verify Docker installation
+  ##################################################################
+
+    - name: Verify Docker installation
+      command: docker version
+      register: docker_version
+      changed_when: false
+
+    - name: Show Docker version
+      debug:
+        var: docker_version.stdout_lines

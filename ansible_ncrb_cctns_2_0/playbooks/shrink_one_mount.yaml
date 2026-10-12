@@ -1,0 +1,144 @@
+---
+# This file is included by shrink_xfs_safe.yaml
+# Processes a single mount target (only /tmp and /var/tmp)
+
+- name: Get mount info for {{ target.mount }}
+  set_fact:
+    mount_info: "{{ ansible_mounts | selectattr('mount', 'equalto', target.mount) | first }}"
+  when: ansible_mounts | selectattr('mount', 'equalto', target.mount) | list | length > 0
+
+- name: Fail if {{ target.mount }} is not a separate mount
+  fail:
+    msg: "{{ target.mount }} is not a separate filesystem"
+  when: mount_info is not defined
+
+- name: Get current size in GB
+  set_fact:
+    current_size_gb: "{{ (mount_info.size_total / (1024**3)) | float }}"
+
+- name: Parse desired new size in GB
+  set_fact:
+    new_size_gb: "{{ target.new_size | regex_replace('[^0-9.]', '') | float }}"
+
+- name: Skip if current size is already <= new size
+  debug:
+    msg: "Skipping {{ target.mount }} (current {{ current_size_gb }}G <= {{ new_size_gb }}G)"
+  when: current_size_gb <= new_size_gb
+
+- block:
+    - name: Ensure backup directory exists
+      file:
+        path: "{{ target.backup_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Check if backup directory has enough space
+      shell: |
+        available=$(df --output=avail /root | tail -1)
+        used=$(du -s {{ target.mount }} | awk '{print $1}')
+        [ $used -lt $available ] && echo "OK" || echo "FAIL"
+      register: space_check
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Fail if not enough space for backup
+      fail:
+        msg: "Not enough space in /root to backup {{ target.mount }}"
+      when: space_check.stdout != "OK"
+
+    - name: Backup data from {{ target.mount }} to {{ target.backup_dir }}
+      command: rsync -aAXv --delete {{ target.mount }}/ {{ target.backup_dir }}/
+      register: backup_result
+      changed_when: backup_result.rc == 0
+
+    - name: Check for processes using {{ target.mount }}
+      shell: lsof +D {{ target.mount }} 2>/dev/null || true
+      register: open_files
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Warn about open files on {{ target.mount }}
+      debug:
+        msg: "The following processes have open files on {{ target.mount }}:\n{{ open_files.stdout }}"
+      when: open_files.stdout != ""
+
+    - name: Unmount {{ target.mount }} (regular)
+      mount:
+        path: "{{ target.mount }}"
+        state: unmounted
+      register: unmount_result
+      ignore_errors: yes
+
+    - name: Force lazy unmount if regular unmount failed
+      command: umount -l {{ target.mount }}
+      when: unmount_result is failed
+      ignore_errors: yes
+      register: lazy_unmount
+
+    - name: Fail if still mounted after lazy unmount
+      command: mountpoint -q {{ target.mount }}
+      register: mounted_check
+      failed_when: mounted_check.rc == 0
+      ignore_errors: yes
+
+    - name: Extract VG and LV names
+      set_fact:
+        vg_name: "{{ mount_info.device | regex_replace('^/dev/mapper/([^-]+)-.*', '\\1') }}"
+        lv_name: "{{ mount_info.device | regex_replace('^/dev/mapper/[^-]+-(.*)$', '\\1') }}"
+
+    # ---- NEW: Deactivate the LV before removal ----
+    - name: Deactivate logical volume {{ vg_name }}/{{ lv_name }}
+      command: lvchange -an {{ vg_name }}/{{ lv_name }}
+      register: deactivate_result
+      ignore_errors: yes
+      changed_when: "'Logical volume' in deactivate_result.stdout"
+
+    - name: Remove logical volume {{ vg_name }}/{{ lv_name }}
+      lvol:
+        vg: "{{ vg_name }}"
+        lv: "{{ lv_name }}"
+        state: absent
+        force: yes
+
+    - name: Recreate logical volume with size {{ target.new_size }}
+      lvol:
+        vg: "{{ vg_name }}"
+        lv: "{{ lv_name }}"
+        size: "{{ target.new_size }}"
+        force: yes
+
+    - name: Create XFS filesystem on /dev/mapper/{{ vg_name }}-{{ lv_name }}
+      filesystem:
+        dev: "/dev/mapper/{{ vg_name }}-{{ lv_name }}"
+        fstype: xfs
+        force: yes
+
+    - name: Mount {{ target.mount }}
+      mount:
+        path: "{{ target.mount }}"
+        src: "/dev/mapper/{{ vg_name }}-{{ lv_name }}"
+        fstype: xfs
+        opts: defaults,noatime
+        state: mounted
+
+    - name: Restore data from backup to {{ target.mount }}
+      command: rsync -aAXv {{ target.backup_dir }}/ {{ target.mount }}/
+      register: restore_result
+      changed_when: restore_result.rc == 0
+
+    - name: Set proper permissions (1777) for {{ target.mount }}
+      file:
+        path: "{{ target.mount }}"
+        state: directory
+        mode: '1777'
+
+    - name: Clean up backup directory
+      file:
+        path: "{{ target.backup_dir }}"
+        state: absent
+
+    - name: Success message
+      debug:
+        msg: "Successfully shrunk {{ target.mount }} to {{ target.new_size }}"
+
+  when: current_size_gb > new_size_gb

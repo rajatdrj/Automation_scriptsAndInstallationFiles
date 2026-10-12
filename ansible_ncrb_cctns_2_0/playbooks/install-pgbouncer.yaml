@@ -1,0 +1,100 @@
+---
+- name: Install and Configure PgBouncer on PostgreSQL Server
+  hosts: postgres_servers
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Check if PGDG repository exists
+      stat:
+        path: /etc/yum.repos.d/pgdg-redhat-all.repo
+      register: pgdg_repo
+
+    - name: Install PostgreSQL PGDG repository
+      dnf:
+        name: https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+        state: present
+        disable_gpg_check: yes
+      when: not pgdg_repo.stat.exists
+
+    - name: Install latest stable PgBouncer
+      dnf:
+        name: pgbouncer
+        state: latest
+
+    - name: Create PgBouncer configuration directory
+      file:
+        path: /etc/pgbouncer
+        state: directory
+        owner: pgbouncer
+        group: pgbouncer
+        mode: '0755'
+
+    - name: Create PgBouncer log directory
+      file:
+        path: /var/log/pgbouncer
+        state: directory
+        owner: pgbouncer
+        group: pgbouncer
+        mode: '0755'
+
+    - name: Copy pgbouncer.ini configuration
+      copy:
+        src: /home/cctnscloud/ansible/files/pgbouncer.ini
+        dest: /etc/pgbouncer/pgbouncer.ini
+        owner: pgbouncer
+        group: pgbouncer
+        mode: '0644'
+      notify:
+        - Restart PgBouncer
+
+    - name: Copy PgBouncer userlist
+      copy:
+        src: /home/cctnscloud/ansible/files/userlist.txt
+        dest: /etc/pgbouncer/userlist.txt
+        owner: pgbouncer
+        group: pgbouncer
+        mode: '0600'
+      notify:
+        - Restart PgBouncer
+
+    - name: Create PgBouncer runtime directory
+      file:
+        path: /var/run/pgbouncer
+        state: directory
+        owner: pgbouncer
+        group: pgbouncer
+        mode: '0755'
+
+    - name: Create PgBouncer log directory
+      file:
+        path: /var/log/pgbouncer
+        state: directory
+        owner: pgbouncer
+        group: pgbouncer
+        mode: '0755'
+
+    - name: Enable and start PgBouncer service
+      systemd:
+        name: pgbouncer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Check PgBouncer service status
+      command: systemctl is-active pgbouncer
+      register: pgbouncer_status
+      changed_when: false
+
+    - name: Display PgBouncer status
+      debug:
+        msg: "PgBouncer service status: {{ pgbouncer_status.stdout }}"
+
+
+  handlers:
+
+    - name: Restart PgBouncer
+      systemd:
+        name: pgbouncer
+        state: restarted

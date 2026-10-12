@@ -1,0 +1,27 @@
+---
+
+- name: Add Kubernetes repo
+  copy:
+    dest: /etc/yum.repos.d/kubernetes.repo
+    content: |
+      [kubernetes]
+      name=Kubernetes
+      baseurl=https://pkgs.k8s.io/core:/stable:/v1.30/rpm/
+      enabled=1
+      gpgcheck=1
+      gpgkey=https://pkgs.k8s.io/core:/stable:/v1.30/rpm/repodata/repomd.xml.key
+
+- name: Install Kubernetes
+  dnf:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+    disable_excludes: all
+    state: present
+
+- name: Enable kubelet
+  service:
+    name: kubelet
+    enabled: yes
+    state: started

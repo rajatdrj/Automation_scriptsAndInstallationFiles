@@ -1,0 +1,60 @@
+---
+- name: Install Kustomize CLI
+  hosts: all
+  become: true
+  vars:
+    kustomize_version: "5.3.0"
+    kustomize_install_dir: "/usr/local/bin"
+    kustomize_binary: "{{ kustomize_install_dir }}/kustomize"
+    kustomize_url: "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv{{ kustomize_version }}/kustomize_v{{ kustomize_version }}_linux_amd64.tar.gz"
+
+  tasks:
+    - name: Check if kustomize is already installed
+      command: "{{ kustomize_binary }} version"
+      register: kustomize_check
+      failed_when: false
+      changed_when: false
+
+    - name: Set fact if correct version is installed
+      set_fact:
+        kustomize_installed: "{{ 'v' ~ kustomize_version in kustomize_check.stdout }}"
+      when: kustomize_check.rc == 0
+
+    - name: Download kustomize archive
+      get_url:
+        url: "{{ kustomize_url }}"
+        dest: "/tmp/kustomize.tar.gz"
+        mode: '0644'
+      when: kustomize_installed is not defined or not kustomize_installed
+
+    - name: Extract kustomize binary
+      unarchive:
+        src: "/tmp/kustomize.tar.gz"
+        dest: "/tmp"
+        remote_src: true
+      when: kustomize_installed is not defined or not kustomize_installed
+
+    - name: Install kustomize binary
+      copy:
+        src: "/tmp/kustomize"
+        dest: "{{ kustomize_binary }}"
+        mode: '0755'
+        owner: root
+        group: root
+        remote_src: true
+      when: kustomize_installed is not defined or not kustomize_installed
+
+    - name: Cleanup temporary files
+      file:
+        path: "/tmp/kustomize.tar.gz"
+        state: absent
+      when: kustomize_installed is not defined or not kustomize_installed
+
+    - name: Verify kustomize installation
+      command: "{{ kustomize_binary }} version"
+      register: kustomize_version_output
+      changed_when: false
+
+    - name: Display installed kustomize version
+      debug:
+        msg: "{{ kustomize_version_output.stdout }}"

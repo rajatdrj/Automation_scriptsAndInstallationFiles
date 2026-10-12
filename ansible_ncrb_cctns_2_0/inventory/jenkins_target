@@ -1,0 +1,2 @@
+[jenkins_target]
+jenkins_server ansible_host=10.212.174.148 ansible_user=cctnscloud

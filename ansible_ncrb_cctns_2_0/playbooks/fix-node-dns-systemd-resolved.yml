@@ -1,0 +1,49 @@
+---
+- name: Fix DNS on Kubernetes nodes using systemd-resolved (CORRECT METHOD)
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    primary_dns: "10.212.174.160"
+    search_domain: "uat.gov.in"
+    iface: "eth0"
+
+  tasks:
+
+    - name: Ensure systemd-resolved is running
+      systemd:
+        name: systemd-resolved
+        state: started
+        enabled: true
+
+    - name: Configure DNS for interface (primary only)
+      command: >
+        resolvectl dns {{ iface }} {{ primary_dns }}
+      register: dns_set
+      changed_when: true
+
+    - name: Configure search domain
+      command: >
+        resolvectl domain {{ iface }} {{ search_domain }}
+      register: domain_set
+      changed_when: true
+
+    - name: Restart systemd-resolved
+      systemd:
+        name: systemd-resolved
+        state: restarted
+
+    - name: Show active DNS status
+      command: resolvectl status {{ iface }}
+      register: dns_status
+      changed_when: false
+
+    - debug:
+        var: dns_status.stdout
+
+    - name: Test DNS resolution (REAL test)
+      command: getent hosts cctns.registry.uat.gov.in
+      register: dns_test
+      changed_when: false
+      failed_when: dns_test.rc != 0
